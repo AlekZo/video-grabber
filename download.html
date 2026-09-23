@@ -26,6 +26,13 @@
   .done .warn, .fail .warn, .done #notice, .fail #notice { display: none; }
   .done .buttons, .fail .buttons { display: flex; }
   .fail details { display: block; }
+  .copy { display: none; margin-top: 22px; }
+  .done .copy { display: block; }
+  button.orange { background: #ef6c00; }
+  #pickOther { display: none; margin-left: 14px; font-size: 17px; color: #1565c0; }
+  #copyStatus { margin-top: 12px; font-size: 18px; }
+  #copyStatus.ok { color: #2e7d32; }
+  #copyStatus.err { color: #e65100; }
 </style>
 </head>
 <body>
@@ -40,6 +47,11 @@
     <button id="open">▶ Открыть видео</button>
     <button id="folder" class="secondary">📁 Показать в папке</button>
     <button id="retry">↻ Попробовать ещё раз</button>
+  </div>
+  <div class="copy">
+    <button id="saveTo" class="orange">💾 Сохранить копию в папку…</button>
+    <a href="#" id="pickOther">выбрать другую папку</a>
+    <div id="copyStatus"></div>
   </div>
   <details><summary>Подробности (для помощника)</summary><pre id="tech"></pre></details>
   <script src="mux.min.js"></script>

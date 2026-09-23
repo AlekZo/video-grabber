@@ -24,8 +24,132 @@ function progress(fraction, text) {
   $('status').textContent = text;
 }
 
+// ---------- «Сохранить копию в папку…» с запоминанием последней папки ----------
+
+// Откуда брать копию: готовый файл в памяти (HLS) или повторная загрузка по ссылке (MP4).
+let copySource = null; // { blob } | { url }
+
+const db = () => new Promise((resolve, reject) => {
+  const req = indexedDB.open('video-grabber', 1);
+  req.onupgradeneeded = () => req.result.createObjectStore('kv');
+  req.onsuccess = () => resolve(req.result);
+  req.onerror = () => reject(req.error);
+});
+async function kv(key, value) {
+  const d = await db();
+  return new Promise((resolve, reject) => {
+    const tx = d.transaction('kv', value === undefined ? 'readonly' : 'readwrite');
+    const req = value === undefined ? tx.objectStore('kv').get(key) : tx.objectStore('kv').put(value, key);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+const getFolder = () => kv('folder').catch(() => null);
+
+function copyStatus(text, cls = '') {
+  $('copyStatus').textContent = text;
+  $('copyStatus').className = cls;
+}
+
+async function refreshSaveButton() {
+  if (!window.showDirectoryPicker) {
+    $('saveTo').textContent = '💾 Сохранить копию в…';
+    return;
+  }
+  const folder = await getFolder();
+  $('saveTo').textContent = folder ? `💾 Сохранить копию в «${folder.name}»` : '💾 Сохранить копию в папку…';
+  $('pickOther').style.display = folder ? 'inline' : 'none';
+}
+
+async function uniqueName(dir, fileName) {
+  const dot = fileName.lastIndexOf('.');
+  const base = fileName.slice(0, dot), ext = fileName.slice(dot);
+  for (let n = 1; ; n++) {
+    const candidate = n === 1 ? fileName : `${base} (${n})${ext}`;
+    try { await dir.getFileHandle(candidate); } catch (e) { return candidate; } // такого файла нет
+  }
+}
+
+async function copyTo(dir, fileName) {
+  const target = await uniqueName(dir, fileName);
+  copyStatus(`Сохраняю копию в «${dir.name}»…`);
+  const writable = await (await dir.getFileHandle(target, { create: true })).createWritable();
+  try {
+    if (copySource.blob) {
+      await writable.write(copySource.blob);
+      await writable.close();
+    } else {
+      const r = await fetch(copySource.url, { credentials: 'include' });
+      if (!r.ok) throw Object.assign(new Error('HTTP ' + r.status), { expired: true });
+      const total = Number(r.headers.get('content-length')) || 0;
+      let got = 0;
+      await r.body.pipeThrough(new TransformStream({
+        transform(chunk, ctl) {
+          got += chunk.byteLength;
+          if (total) copyStatus(`Сохраняю копию в «${dir.name}»… ${Math.floor(got / total * 100)}%`);
+          ctl.enqueue(chunk);
+        },
+      })).pipeTo(writable);
+    }
+  } catch (e) {
+    await writable.abort().catch(() => {});
+    await dir.removeEntry(target).catch(() => {});
+    throw e;
+  }
+  copyStatus(`✔ Копия сохранена в папку «${dir.name}» (файл «${target}»).`, 'ok');
+}
+
+async function saveCopy(pickNew, fileName) {
+  try {
+    // Firefox не умеет выбирать папку — открываем обычное окно «Сохранить как».
+    if (!window.showDirectoryPicker) {
+      const url = copySource.blob ? URL.createObjectURL(copySource.blob) : copySource.url;
+      await chrome.downloads.download({ url, filename: fileName, saveAs: true });
+      return;
+    }
+    let dir = pickNew ? null : await getFolder();
+    if (!dir) {
+      const last = await getFolder();
+      dir = await window.showDirectoryPicker({ id: 'video-grabber', mode: 'readwrite', startIn: last || 'downloads' });
+      await kv('folder', dir).catch(() => {});
+      refreshSaveButton();
+    }
+    if ((await dir.queryPermission({ mode: 'readwrite' })) !== 'granted' &&
+        (await dir.requestPermission({ mode: 'readwrite' })) !== 'granted') {
+      copyStatus('Браузер не дал доступ к папке. Нажмите кнопку ещё раз и выберите «Разрешить».', 'err');
+      return;
+    }
+    await copyTo(dir, fileName);
+  } catch (e) {
+    if (e.name === 'AbortError') return copyStatus(''); // передумали выбирать — ничего страшного
+    console.error(e);
+    if (e.name === 'NotFoundError') {
+      await kv('folder', null).catch(() => {});
+      refreshSaveButton();
+      return copyStatus('Эта папка больше не найдена (возможно, флешку вынули). Нажмите кнопку и выберите папку заново.', 'err');
+    }
+    if (e.expired) return copyStatus('Ссылка на видео устарела. Скопируйте файл из папки «Загрузки» вручную или скачайте видео заново.', 'err');
+    if (e.name === 'QuotaExceededError' || /space/i.test(e.message)) return copyStatus('В выбранной папке не хватает места.', 'err');
+    copyStatus('Не получилось сохранить копию. Попробуйте ещё раз или выберите другую папку.', 'err');
+  }
+}
+
+// Если папка уже выбрана раньше и браузер помнит разрешение — копируем сразу, без вопросов.
+async function autoCopy(fileName) {
+  if (!window.showDirectoryPicker) return;
+  const dir = await getFolder();
+  if (!dir) return;
+  try {
+    if ((await dir.queryPermission({ mode: 'readwrite' })) === 'granted') await saveCopy(false, fileName);
+  } catch (e) { /* не вышло автоматически — остаётся кнопка */ }
+}
+
 function finish(downloadId, fileName) {
   working = false;
+  refreshSaveButton();
+  $('saveTo').onclick = () => saveCopy(false, fileName);
+  $('pickOther').onclick = e => { e.preventDefault(); saveCopy(true, fileName); };
+  autoCopy(fileName);
   document.body.className = 'done';
   $('head').textContent = 'Готово!';
   $('fill').style.width = '100%';
@@ -116,6 +240,7 @@ async function saveAndWait(url, fileName, onBytes) {
 async function downloadMp4() {
   const r = await saveAndWait(src, name + '.mp4', (got, total) =>
     progress(got / total, `Скачано ${mb(got)} из ${mb(total)}`));
+  copySource = { url: src };
   finish(r.id, r.fileName);
 }
 
@@ -257,6 +382,7 @@ async function downloadHls() {
   const ext = mode === 'ts' ? 'ts' : 'mp4';
   const blob = new Blob(parts, { type: ext === 'mp4' ? 'video/mp4' : 'video/mp2t' });
   const r = await saveAndWait(URL.createObjectURL(blob), `${name}.${ext}`);
+  copySource = { blob };
   finish(r.id, r.fileName);
 }
 

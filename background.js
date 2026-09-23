@@ -54,8 +54,8 @@ async function addItem(tabId, item) {
   chrome.action.setBadgeBackgroundColor({ tabId, color: '#2e7d32' });
 }
 
-async function addHls(tabId, url, text) {
-  const item = { url, kind: 'hls', size: 0, time: Date.now() };
+async function addHls(tabId, url, frameId, text) {
+  const item = { url, kind: 'hls', size: 0, frameId, time: Date.now() };
   try {
     if (text === undefined) text = await (await fetch(url, { credentials: 'include' })).text();
     if (text.includes('#EXT-X-STREAM-INF')) item.variants = parseMaster(text, url);
@@ -64,7 +64,7 @@ async function addHls(tabId, url, text) {
 }
 
 // Проверяем адрес «на вкус»: плейлист это, видеофайл или что-то другое.
-async function checkUrl(tabId, url) {
+async function checkUrl(tabId, url, frameId) {
   const known = (await chrome.storage.session.get('t' + tabId))['t' + tabId] || [];
   if (known.some(v => v.url === url)) return;
   try {
@@ -80,10 +80,10 @@ async function checkUrl(tabId, url) {
     clearTimeout(timer);
     if (!r.ok) return;
     const head = new TextDecoder().decode((first.value || new Uint8Array()).slice(0, 4096));
-    if (head.replace(/^﻿/, '').trimStart().startsWith('#EXTM3U')) return addHls(tabId, url);
+    if (head.replace(/^﻿/, '').trimStart().startsWith('#EXTM3U')) return addHls(tabId, url, frameId);
     if (/^video\//i.test(type) && !/mp2t/i.test(type)) {
       if (size && size < 1024 * 1024) return;
-      return addItem(tabId, { url, kind: 'mp4', size, time: Date.now() });
+      return addItem(tabId, { url, kind: 'mp4', size, frameId, time: Date.now() });
     }
   } catch (e) { /* не получилось — значит не видео */ }
 }
@@ -94,14 +94,14 @@ chrome.webRequest.onHeadersReceived.addListener(
     if (d.statusCode >= 400) return;
     const kind = detect(d.url, header(d.responseHeaders, 'content-type'));
 
-    if (kind === 'hls') return run(() => addHls(d.tabId, d.url));
+    if (kind === 'hls') return run(() => addHls(d.tabId, d.url, d.frameId));
     if (kind === 'mp4') {
       const size = totalSize(d.responseHeaders);
       if (size && size < 1024 * 1024) return; // мелочь (превью, реклама) не показываем
-      return run(() => addItem(d.tabId, { url: d.url, kind, size, time: Date.now() }));
+      return run(() => addItem(d.tabId, { url: d.url, kind, size, frameId: d.frameId, time: Date.now() }));
     }
     if (d.type === 'xmlhttprequest' && CANDIDATE_RE.test(d.url) && !SEGMENT_RE.test(new URL(d.url).pathname)) {
-      run(() => checkUrl(d.tabId, d.url));
+      run(() => checkUrl(d.tabId, d.url, d.frameId));
     }
   },
   { urls: ['<all_urls>'] },
@@ -111,7 +111,7 @@ chrome.webRequest.onHeadersReceived.addListener(
 // Окно расширения присылает адреса, найденные прямо на странице.
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   if (msg && msg.type === 'check') {
-    Promise.all(msg.urls.map(u => run(() => checkUrl(msg.tabId, u)))).then(() => reply(true));
+    Promise.all(msg.urls.map(u => run(() => checkUrl(msg.tabId, u.url, u.frameId)))).then(() => reply(true));
     return true;
   }
 });
