@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Скачивание видео</title>
+<link rel="icon" href="icons/icon32.png">
+<style>
+  body { font: 20px/1.45 system-ui, "Segoe UI", sans-serif; max-width: 640px; margin: 60px auto; padding: 0 16px; color: #1a1a1a; background: #fff; }
+  h1 { font-size: 26px; margin: 0 0 8px; }
+  #name { color: #555; font-size: 18px; word-break: break-word; margin-bottom: 28px; }
+  .bar { height: 28px; background: #e8e8e8; border-radius: 14px; overflow: hidden; }
+  .fill { height: 100%; width: 0; background: #2e7d32; transition: width .3s; }
+  #percent { font-size: 44px; font-weight: 700; margin: 18px 0 4px; }
+  #status { color: #444; }
+  .warn { margin-top: 28px; padding: 14px 16px; background: #fff8e1; border-radius: 10px; font-size: 18px; }
+  .buttons { display: none; gap: 14px; flex-wrap: wrap; margin-top: 28px; }
+  button { font: 600 20px system-ui, "Segoe UI", sans-serif; padding: 16px 26px; border: 0; border-radius: 12px; cursor: pointer; color: #fff; background: #2e7d32; }
+  button.secondary { background: #1e88e5; }
+  #notice { display: none; margin-top: 18px; padding: 14px 16px; background: #e3f2fd; border-radius: 10px; font-size: 18px; }
+  #notice.show { display: block; }
+  details { display: none; margin-top: 34px; font-size: 14px; color: #777; }
+  details pre { white-space: pre-wrap; word-break: break-all; }
+  .done #percent { color: #2e7d32; }
+  .fail #percent { color: #e65100; font-size: 30px; }
+  .fail .bar { display: none; }
+  .done .warn, .fail .warn, .done #notice, .fail #notice { display: none; }
+  .done .buttons, .fail .buttons { display: flex; }
+  .fail details { display: block; }
+</style>
+</head>
+<body>
+  <h1 id="head">Скачиваю видео…</h1>
+  <div id="name"></div>
+  <div class="bar"><div class="fill" id="fill"></div></div>
+  <div id="percent">0%</div>
+  <div id="status">Подготовка…</div>
+  <div id="notice"></div>
+  <div class="warn">⚠ Пожалуйста, не закрывайте эту вкладку, пока не появится надпись «Готово».</div>
+  <div class="buttons">
+    <button id="open">▶ Открыть видео</button>
+    <button id="folder" class="secondary">📁 Показать в папке</button>
+    <button id="retry">↻ Попробовать ещё раз</button>
+  </div>
+  <details><summary>Подробности (для помощника)</summary><pre id="tech"></pre></details>
+  <script src="mux.min.js"></script>
+  <script src="mp4.js"></script>
+  <script src="download.js"></script>
+</body>
+</html>
