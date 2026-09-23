@@ -2,15 +2,47 @@ const root = document.getElementById('root');
 
 const cleanName = s => (s || 'Видео').replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100) || 'Видео';
 
-(async () => {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  const key = 't' + tab.id;
-  const all = (await chrome.storage.session.get(key))[key] || [];
+// Выполняется внутри страницы (и внутри рамки с плеером): собирает адреса видео.
+function scanPage() {
+  const urls = new Set();
+  const add = u => { try { if (u) urls.add(new URL(u, location.href).href); } catch (e) {} };
+  document.querySelectorAll('[data-master]').forEach(e => add(e.getAttribute('data-master')));
+  document.querySelectorAll('video, source').forEach(v => {
+    add(v.getAttribute('src'));
+    if (v.currentSrc) add(v.currentSrc);
+  });
+  const re = /m3u8|playlist|master|manifest|\/(144|240|360|480|540|576|720|1080|1440|2160)p?(\?|#|$)/i;
+  performance.getEntriesByType('resource').forEach(e => { if (re.test(e.name)) add(e.name); });
+  return [...urls].filter(u => /^https?:/i.test(u));
+}
 
+async function readItems(tabId) {
+  const key = 't' + tabId;
+  const all = (await chrome.storage.session.get(key))[key] || [];
   // Отдельные качества прячем: мастер-плейлист сам выберет лучшее.
-  const items = all
+  return all
     .filter(v => !all.some(m => m.variants && m.variants.some(x => x.url === v.url)))
     .sort((a, b) => (b.variants ? 1 : 0) - (a.variants ? 1 : 0));
+}
+
+(async () => {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  root.innerHTML = '<h1>Ищу видео…</h1>';
+
+  try {
+    const results = await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, func: scanPage });
+    const urls = [...new Set(results.flatMap(r => r.result || []))];
+    if (urls.length) {
+      await Promise.race([
+        chrome.runtime.sendMessage({ type: 'check', tabId: tab.id, urls }),
+        new Promise(r => setTimeout(r, 12000)),
+      ]);
+    }
+  } catch (e) {
+    console.warn(e); // например, служебная страница браузера — просто покажем, что нашли по сети
+  }
+
+  const items = await readItems(tab.id);
 
   if (!items.length) {
     root.innerHTML = `
@@ -18,6 +50,7 @@ const cleanName = s => (s || 'Видео').replace(/[\\/:*?"<>|]+/g, ' ').replac
       <ol>
         <li>Нажмите ▶ на видео, чтобы оно начало играть.</li>
         <li>Снова нажмите на красный значок со стрелкой.</li>
+        <li>Если не помогло — обновите страницу (клавиша F5) и повторите.</li>
       </ol>`;
     return;
   }

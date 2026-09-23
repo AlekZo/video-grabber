@@ -1,6 +1,9 @@
 // Ловим сетевые запросы вкладки и запоминаем найденные видео.
 
 const SEGMENT_RE = /\.(ts|m4s|aac|m4a|vtt|key)(\?|#|$)|[\/_-](seg|segment|chunk|frag)[^\/]*$/i;
+// Адреса, которые могут оказаться плейлистом без «.m3u8» в имени
+// (например, на GetCourse: .../playlist/..., .../master/..., .../720).
+const CANDIDATE_RE = /playlist|master|manifest|\/(144|240|360|480|540|576|720|1080|1440|2160)p?(\?|#|$)/i;
 
 function header(headers, name) {
   const h = (headers || []).find(h => h.name.toLowerCase() === name);
@@ -51,29 +54,67 @@ async function addItem(tabId, item) {
   chrome.action.setBadgeBackgroundColor({ tabId, color: '#2e7d32' });
 }
 
+async function addHls(tabId, url, text) {
+  const item = { url, kind: 'hls', size: 0, time: Date.now() };
+  try {
+    if (text === undefined) text = await (await fetch(url, { credentials: 'include' })).text();
+    if (text.includes('#EXT-X-STREAM-INF')) item.variants = parseMaster(text, url);
+  } catch (e) { /* не страшно — скачаем как есть */ }
+  await addItem(tabId, item);
+}
+
+// Проверяем адрес «на вкус»: плейлист это, видеофайл или что-то другое.
+async function checkUrl(tabId, url) {
+  const known = (await chrome.storage.session.get('t' + tabId))['t' + tabId] || [];
+  if (known.some(v => v.url === url)) return;
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 10000);
+    const r = await fetch(url, { credentials: 'include', signal: ctrl.signal });
+    const type = r.headers.get('content-type') || '';
+    const size = Number(r.headers.get('content-length')) || 0;
+    // Читаем только начало ответа, чтобы не тянуть целое видео.
+    const reader = r.body.getReader();
+    const first = await reader.read();
+    reader.cancel().catch(() => {});
+    clearTimeout(timer);
+    if (!r.ok) return;
+    const head = new TextDecoder().decode((first.value || new Uint8Array()).slice(0, 4096));
+    if (head.replace(/^﻿/, '').trimStart().startsWith('#EXTM3U')) return addHls(tabId, url);
+    if (/^video\//i.test(type) && !/mp2t/i.test(type)) {
+      if (size && size < 1024 * 1024) return;
+      return addItem(tabId, { url, kind: 'mp4', size, time: Date.now() });
+    }
+  } catch (e) { /* не получилось — значит не видео */ }
+}
+
 chrome.webRequest.onHeadersReceived.addListener(
   d => {
-    if (d.tabId < 0 || (d.initiator || '').startsWith('chrome-extension://')) return;
+    if (d.tabId < 0 || (d.initiator || '').startsWith('chrome-extension://') || (d.originUrl || '').startsWith('moz-extension://')) return;
     if (d.statusCode >= 400) return;
     const kind = detect(d.url, header(d.responseHeaders, 'content-type'));
-    if (!kind) return;
 
-    run(async () => {
-      const item = { url: d.url, kind, size: totalSize(d.responseHeaders), time: Date.now() };
-      if (kind === 'hls') {
-        try {
-          const text = await (await fetch(d.url, { credentials: 'include' })).text();
-          if (text.includes('#EXT-X-STREAM-INF')) item.variants = parseMaster(text, d.url);
-        } catch (e) { /* не страшно — скачаем как есть */ }
-      } else if (item.size && item.size < 1024 * 1024) {
-        return; // мелочь (превью, реклама) не показываем
-      }
-      await addItem(d.tabId, item);
-    });
+    if (kind === 'hls') return run(() => addHls(d.tabId, d.url));
+    if (kind === 'mp4') {
+      const size = totalSize(d.responseHeaders);
+      if (size && size < 1024 * 1024) return; // мелочь (превью, реклама) не показываем
+      return run(() => addItem(d.tabId, { url: d.url, kind, size, time: Date.now() }));
+    }
+    if (d.type === 'xmlhttprequest' && CANDIDATE_RE.test(d.url) && !SEGMENT_RE.test(new URL(d.url).pathname)) {
+      run(() => checkUrl(d.tabId, d.url));
+    }
   },
   { urls: ['<all_urls>'] },
   ['responseHeaders']
 );
+
+// Окно расширения присылает адреса, найденные прямо на странице.
+chrome.runtime.onMessage.addListener((msg, sender, reply) => {
+  if (msg && msg.type === 'check') {
+    Promise.all(msg.urls.map(u => run(() => checkUrl(msg.tabId, u)))).then(() => reply(true));
+    return true;
+  }
+});
 
 // Новая страница во вкладке — чистим список.
 chrome.tabs.onUpdated.addListener((tabId, info) => {
