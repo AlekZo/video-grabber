@@ -138,7 +138,9 @@ function startDownload(v, fileName, active) {
     return `${page} — ${String(i + 1).padStart(2, '0')} ${label || 'Видео'}`;
   };
 
-  root.innerHTML = `<h1>${items.length > 1 ? 'На странице видео: ' + items.length : 'Видео найдено'}</h1>`;
+  const h1 = document.createElement('h1');
+  h1.textContent = items.length > 1 ? 'На странице видео: ' + items.length : 'Видео найдено';
+  root.replaceChildren(h1);
 
   if (items.length > 1) {
     const all = document.createElement('button');

@@ -29,13 +29,18 @@
     })(0, init.byteLength);
   }
 
+  // seconds — длина видео из плейлиста (сумма #EXTINF), чтобы сразу записать её в заголовок.
   class TsToMp4 {
-    constructor() {
+    constructor(seconds) {
       this.init = null;
       this.parts = [];
       this.t = new g.muxjs.mp4.Transmuxer();
       this.t.on('data', s => {
-        if (!this.init) this.init = new Uint8Array(s.initSegment);
+        if (!this.init) {
+          this.init = new Uint8Array(s.initSegment);
+          if (seconds > 0) patchDuration(this.init, seconds);
+          this.parts.push(this.init);
+        }
         this.parts.push(new Uint8Array(s.data));
       });
     }
@@ -46,9 +51,11 @@
       this.t.flush();
       return this.parts.length > before;
     }
-    finish(seconds) {
-      if (seconds > 0) patchDuration(this.init, seconds);
-      return [this.init, ...this.parts];
+    // Забрать готовые куски файла (по порядку), чтобы сразу записать их на диск.
+    take() {
+      const out = this.parts;
+      this.parts = [];
+      return out;
     }
   }
 
