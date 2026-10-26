@@ -1,4 +1,6 @@
 const root = document.getElementById('root');
+let lowResource = true;
+const resetQuality = [];
 
 const cleanName = s => (s || '').replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100);
 
@@ -37,6 +39,8 @@ function scanPage() {
   };
 
   document.querySelectorAll('[data-master]').forEach(e => add(e.getAttribute('data-master'), e));
+  document.querySelectorAll('[data-video-src]').forEach(e => add(e.getAttribute('data-video-src'), e));
+  if (/(^|\.)kinescope\.io$/i.test(location.hostname) && /^\/embed\//.test(location.pathname)) add(location.href, null);
   document.querySelectorAll('video').forEach(v => {
     add(v.getAttribute('src'), v);
     if (v.currentSrc) add(v.currentSrc, v);
@@ -83,23 +87,30 @@ function buildMeta(results) {
 async function readItems(tabId, meta) {
   const key = 't' + tabId;
   const all = (await chrome.storage.session.get(key))[key] || [];
-  // Отдельные качества прячем: мастер-плейлист сам выберет лучшее.
-  const items = all
-    .filter(v => !all.some(m => m.variants && m.variants.some(x => x.url === v.url)))
+  // Дорожки и исходные MP4 из HLS не являются отдельными видео.
+  const items = Hls.visibleItems(all)
     .map(v => ({ ...v, ...(meta.byUrl[v.url] || meta.byFrame[v.frameId] || {}) }));
   // По порядку на странице; то, что нашлось только по сети, — в конце.
   items.sort((a, b) => (a.pos ?? 1e12) - (b.pos ?? 1e12));
   return items;
 }
 
-function startDownload(v, fileName, active) {
-  const q = new URLSearchParams({ src: v.url, kind: v.kind, name: fileName });
-  chrome.tabs.create({ url: chrome.runtime.getURL('download.html?' + q), active });
+function startDownload(v, fileName, active, batch = null) {
+  const q = ResourceMode.jobParams(v, fileName, { enabled: lowResource, batch, index: batch ? 0 : null });
+  return chrome.tabs.create({ url: chrome.runtime.getURL('download.html?' + q), active });
 }
 
 (async () => {
+  try { lowResource = (await chrome.storage.local?.get('lowResource'))?.lowResource ?? true; } catch (e) { /* включён по умолчанию */ }
+  const modeToggle = document.getElementById('lowResource');
+  modeToggle.checked = lowResource;
+  modeToggle.onchange = () => {
+    lowResource = modeToggle.checked;
+    Promise.resolve(chrome.storage.local?.set({ lowResource })).catch(console.warn);
+    resetQuality.forEach(reset => reset());
+  };
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  root.innerHTML = '<h1>Ищу видео…</h1>';
+  root.innerHTML = '<h1>Ищу видео и аудио…</h1>';
 
   let meta = { byFrame: {}, byUrl: {} };
   try {
@@ -117,7 +128,7 @@ function startDownload(v, fileName, active) {
     console.warn(e); // например, служебная страница браузера — просто покажем, что нашли по сети
   }
 
-  const items = await readItems(tab.id, meta);
+  const items = (await readItems(tab.id, meta)).map(v => ({ ...v, pageUrl: tab.url }));
 
   if (!items.length) {
     root.innerHTML = `
@@ -131,24 +142,38 @@ function startDownload(v, fileName, active) {
   }
 
   const page = cleanName(tab.title) || 'Видео';
-  const titleOf = (v, i) => cleanName(v.label) || (items.length > 1 ? `Видео ${i + 1}` : 'Видео');
+  const titleOf = (v, i) => cleanName(v.label) || (v.mediaType === 'audio' ? 'Аудио' : 'Видео') + (items.length > 1 ? ` ${i + 1}` : '');
   const fileOf = (v, i) => {
     const label = cleanName(v.label);
     if (items.length === 1) return label && !page.includes(label) ? `${page} — ${label}` : page;
-    return `${page} — ${String(i + 1).padStart(2, '0')} ${label || 'Видео'}`;
+    return `${page} — ${String(i + 1).padStart(2, '0')} ${label || (v.mediaType === 'audio' ? 'Аудио' : 'Видео')}`;
   };
 
   const h1 = document.createElement('h1');
-  h1.textContent = items.length > 1 ? 'На странице видео: ' + items.length : 'Видео найдено';
+  h1.textContent = items.length > 1 ? 'Найдено файлов: ' + items.length : items[0].mediaType === 'audio' ? 'Аудио найдено' : items[0].mediaType === 'unknown' ? 'Файл найден' : 'Видео найдено';
   root.replaceChildren(h1);
+  const selections = new Map();
 
   if (items.length > 1) {
     const all = document.createElement('button');
     all.className = 'all';
     all.textContent = `⬇ Скачать все (${items.length})`;
-    all.onclick = () => {
-      items.forEach((v, i) => startDownload(v, fileOf(v, i), i === 0));
-      window.close();
+    all.onclick = async () => {
+      all.disabled = true;
+      try {
+        if (lowResource) {
+          const id = crypto.randomUUID();
+          const jobs = items.map((v, i) => ({ ...v, ...selections.get(v.url), fileName: fileOf(v, i) }));
+          // Только необходимые для загрузки поля: не сохраняем заново длинные списки сегментов.
+          const queue = jobs.map(v => ({ url: v.url, kind: v.kind, mediaType: v.mediaType, audioUrl: v.audioUrl,
+            videoUrl: v.videoUrl, pageUrl: v.pageUrl, fileName: v.fileName }));
+          await chrome.storage.session.set({ ['batch:' + id]: queue });
+          await startDownload(queue[0], queue[0].fileName, true, id);
+        } else {
+          for (let i = 0; i < items.length; i++) await startDownload({ ...items[i], ...selections.get(items[i].url) }, fileOf(items[i], i), i === 0);
+        }
+        window.close();
+      } catch (e) { all.disabled = false; console.error(e); }
     };
     root.appendChild(all);
     const p = document.createElement('p');
@@ -159,24 +184,89 @@ function startDownload(v, fileName, active) {
 
   items.forEach((v, i) => {
     let quality = '';
-    if (v.variants && v.variants.length) {
-      const best = v.variants.reduce((a, b) => (b.bw > a.bw ? b : a));
+    const availableQualities = v.variants || v.videoTracks || [];
+    if (availableQualities.length) {
+      const best = Hls.selectStreams({ variants: availableQualities, renditions: v.renditions || [] }, { maxHeight: lowResource ? 720 : null });
       if (best.res) quality = 'Качество ' + best.res.split('x')[1] + 'p';
     } else if (v.size) {
       quality = 'Размер ' + (v.size / 1024 / 1024).toFixed(0) + ' МБ';
     }
 
     const btn = document.createElement('button');
-    btn.textContent = (items.length > 1 ? `${i + 1}. ` : '⬇ ') + (items.length > 1 ? titleOf(v, i) : 'Скачать видео');
+    btn.className = v.mediaType === 'audio' ? 'audio' : '';
+    btn.textContent = (items.length > 1 ? `${i + 1}. ` : '⬇ ') + (items.length > 1 ? titleOf(v, i) : v.mediaType === 'audio' ? 'Скачать аудио' : 'Скачать видео');
+    const badge = document.createElement('small');
+    badge.className = 'media-kind';
+    badge.textContent = Hls.mediaLabel(v.mediaType);
+    btn.appendChild(badge);
+    const explain = text => {
+      const line = document.createElement('small');
+      line.textContent = text;
+      btn.appendChild(line);
+    };
+    if (v.kind === 'hls' && v.mediaType === 'av') explain('🔗 Видео и звук — один файл');
+    if (v.duplicateCount) explain(`♻ Скрыто подтверждённых дублей: ${v.duplicateCount}`);
+    if (v.relatedCount) explain('Дорожки и варианты качества сгруппированы');
+    if (v.label && items.some(other => other !== v && other.label === v.label)) explain('Совпадает название; дубль не подтверждён');
+    let qualityInfo = null;
     if (quality) {
       const s = document.createElement('small');
+      qualityInfo = s;
       s.textContent = quality;
       btn.appendChild(s);
     }
     btn.onclick = () => {
-      startDownload(v, fileOf(v, i), true);
+      startDownload({ ...v, ...selections.get(v.url) }, fileOf(v, i), true);
       window.close();
     };
     root.appendChild(btn);
+    const variants = v.variants || v.videoTracks || [];
+    const audioTracks = v.renditions?.filter(r => r.type === 'AUDIO') || v.audioTracks || [];
+    if (variants.length > 1 || audioTracks.length > 1) {
+      const details = document.createElement('details');
+      const summary = document.createElement('summary');
+      summary.textContent = 'Качество и язык звука';
+      details.appendChild(summary);
+      const quality = document.createElement('select'), audio = document.createElement('select');
+      quality.ariaLabel = 'Качество видео'; audio.ariaLabel = 'Язык звука';
+      const defaultVariant = () => Hls.selectStreams({ variants, renditions: v.renditions || [] }, { maxHeight: lowResource ? 720 : null });
+      const best = defaultVariant();
+      const choice = { videoUrl: best?.url, audioUrl: v.audioUrl || null };
+      selections.set(v.url, choice);
+      for (const variant of variants) {
+        const option = document.createElement('option');
+        option.value = variant.url;
+        option.textContent = variant.res ? variant.res.split('x')[1] + 'p' : 'Качество ' + (variant.bw || 'по умолчанию');
+        quality.appendChild(option);
+      }
+      quality.value = best?.url || '';
+      const updateAudio = () => {
+        const variant = variants.find(x => x.url === quality.value);
+        const tracks = v.renditions ? audioTracks.filter(a => a.group === variant?.audio) : audioTracks;
+        audio.replaceChildren();
+        for (const track of tracks) {
+          const option = document.createElement('option');
+          option.value = track.url || '';
+          option.textContent = track.name || track.language || 'Звук по умолчанию';
+          audio.appendChild(option);
+        }
+        const selected = tracks.find(t => t.url === choice.audioUrl) || tracks.find(t => t.default) || tracks[0];
+        choice.audioUrl = selected?.url || null;
+        audio.value = choice.audioUrl || '';
+        audio.style.display = tracks.length > 1 ? 'block' : 'none';
+      };
+      quality.onchange = () => {
+        choice.videoUrl = quality.value;
+        const variant = variants.find(x => x.url === quality.value);
+        if (qualityInfo && variant?.res) qualityInfo.textContent = 'Качество ' + variant.res.split('x')[1] + 'p';
+        updateAudio();
+      };
+      audio.onchange = () => { choice.audioUrl = audio.value || null; };
+      updateAudio();
+      resetQuality.push(() => { quality.value = defaultVariant()?.url || ''; quality.onchange(); });
+      if (variants.length > 1) details.appendChild(quality);
+      details.appendChild(audio);
+      root.appendChild(details);
+    }
   });
 })();

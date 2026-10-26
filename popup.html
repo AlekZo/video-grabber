@@ -13,15 +13,29 @@
   button:hover { background: #1b5e20; }
   button.all { background: #1e88e5; }
   button.all:hover { background: #1565c0; }
+  button.audio { background: #6345a0; }
+  button.audio:hover { background: #4b327d; }
+  button .media-kind { display: table; margin: 7px 0 4px; padding: 3px 7px; border-radius: 6px; background: #ffffff26; opacity: 1; font-weight: 600; }
   .muted { margin: 2px 0 8px; }
   button small { display: block; font-weight: 400; font-size: 14px; opacity: .9; margin-top: 1px; }
   ol { margin: 0; padding-left: 24px; }
   li { margin-bottom: 6px; }
   .muted { color: #555; font-size: 14px; }
+  details { margin: -2px 0 14px; font-size: 14px; color: #444; }
+  summary { cursor: pointer; }
+  select { display: block; width: 100%; margin-top: 7px; padding: 7px; border: 1px solid #ccc; border-radius: 6px; font: inherit; background: #fff; }
+  .resource-mode { display: block; margin: 0 0 14px; padding: 9px; background: #edf5ee; border-radius: 8px; font-size: 14px; }
+  .resource-mode input { accent-color: #2e7d32; }
+  .resource-mode small { display: block; color: #444; margin: 4px 0 0 23px; }
 </style>
 </head>
 <body>
+  <label class="resource-mode"><input id="lowResource" type="checkbox" checked> Экономный режим
+    <small>До 720p по умолчанию · один ролик за раз · запись на диск</small>
+  </label>
   <div id="root"></div>
+  <script src="hls.js"></script>
+  <script src="resource-mode.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

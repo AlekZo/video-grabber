@@ -8,6 +8,10 @@
   body { font: 17px/1.4 system-ui, "Segoe UI", sans-serif; max-width: 600px; margin: 28px auto; padding: 0 16px; color: #1a1a1a; background: #fff; }
   h1 { font-size: 22px; margin: 0 0 2px; }
   #name { color: #555; font-size: 16px; word-break: break-word; margin-bottom: 14px; }
+  #mediaType { display: table; margin: 0 0 14px; padding: 5px 10px; border-radius: 7px; background: #eef3f8; font-size: 15px; }
+  #mediaType.audio { background: #eee7fa; color: #4b327d; font-weight: 600; }
+  #verification { margin: 8px 0; color: #246c28; font-size: 15px; }
+  #verification:empty { display: none; }
   .bar { height: 16px; background: #e8e8e8; border-radius: 8px; overflow: hidden; }
   .fill { height: 100%; width: 0; background: #2e7d32; transition: width .3s; }
   #percent { font-size: 30px; font-weight: 700; margin: 8px 0 0; }
@@ -36,14 +40,24 @@
   .done .warn, .fail .warn, .done #notice, .fail #notice, .done #choose, .fail #choose { display: none; }
   .done .buttons, .fail .buttons { display: flex; }
   .fail details { display: block; }
+  details.alternative { display: block; color: #444; }
+  .alternative textarea { box-sizing: border-box; width: 100%; min-height: 95px; margin: 8px 0; padding: 8px; font: 13px/1.4 monospace; }
+  .alternative p { margin: 8px 0; }
+  [hidden] { display: none !important; }
+  #resourceMode { margin: 0 0 12px; color: #35663d; font-size: 14px; }
+  #resourceMode:empty { display: none; }
+  body[data-low-resource="true"] .fill { transition: none; }
 </style>
 </head>
 <body>
   <h1 id="head">Скачиваю видео…</h1>
   <div id="name"></div>
+  <div id="mediaType" role="status">❔ Проверяю состав дорожек…</div>
+  <div id="resourceMode"></div>
   <div class="bar"><div class="fill" id="fill"></div></div>
   <div id="percent">0%</div>
   <div id="status">Подготовка…</div>
+  <div id="verification" role="status"></div>
   <div id="notice" class="box"></div>
   <div id="choose" class="box">
     <p id="chooseText"><b>Куда сохранить видео?</b> Выберите папку — например, флешку. Пока вы выбираете, видео уже скачивается.</p>
@@ -58,9 +72,19 @@
     <button id="retry">↻ Попробовать ещё раз</button>
   </div>
   <video id="player" controls></video>
+  <details id="alternative" class="alternative">
+    <summary>Другой способ скачивания</summary>
+    <p id="commandHelp"></p>
+    <textarea id="externalCommand" readonly aria-label="Команда скачивания для PowerShell"></textarea>
+    <button id="copyCommand" class="secondary">Скопировать команду</button>
+    <p id="commandStatus" role="status"></p>
+  </details>
   <details><summary>Подробности (для помощника)</summary><pre id="tech"></pre></details>
   <script src="mux.min.js"></script>
   <script src="mp4.js"></script>
+  <script src="hls.js"></script>
+  <script src="resource-mode.js"></script>
+  <script src="fallback.js"></script>
   <script src="download.js"></script>
 </body>
 </html>
