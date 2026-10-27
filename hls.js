@@ -51,9 +51,12 @@
       pool.reduce((a, b) => !a || b.bw > a.bw ? b : a, null);
     if (!best) return null;
     const audio = renditions.filter(r => r.type === 'AUDIO' && r.group === best.audio);
-    const chosen = preferences.audioUrl ? audio.find(r => r.url === preferences.audioUrl) :
-      audio.find(r => r.default) || audio.find(r => r.auto) || audio[0];
-    if (preferences.audioUrl && !chosen) throw new Error('Audio does not belong to the selected video group');
+    const requestedAudio = preferences.audioUrl && audio.find(r => r.url === preferences.audioUrl);
+    // A refreshed master can contain new signed URLs. If the old URL now belongs
+    // to another group, reject it; if it disappeared, use this variant's group.
+    if (preferences.audioUrl && !requestedAudio && renditions.some(r => r.type === 'AUDIO' && r.url === preferences.audioUrl))
+      throw new Error('Audio does not belong to the selected video group');
+    const chosen = requestedAudio || audio.find(r => r.default) || audio.find(r => r.auto) || audio[0];
     if (best.audio && !chosen) throw new Error('HLS audio group missing: ' + best.audio);
     return { ...best, audioUrl: chosen ? chosen.url : null };
   }

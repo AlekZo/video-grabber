@@ -308,7 +308,9 @@ async function finishFolder() {
 async function finishDownloads() {
   await sink.chain;
   const ext = await extReady;
-  const blob = spool ? await spool.file() : new Blob(sink.chunks, { type: ext === 'm4a' ? 'audio/mp4' : ext === 'mp4' ? 'video/mp4' : 'video/mp2t' });
+  const mime = ext === 'm4a' ? 'audio/mp4' : ext === 'mp4' ? 'video/mp4' : 'video/mp2t';
+  const file = spool ? await spool.file() : null;
+  const blob = file ? file.slice(0, file.size, mime) : new Blob(sink.chunks, { type: mime });
   const objectUrl = URL.createObjectURL(blob);
   let r;
   try {

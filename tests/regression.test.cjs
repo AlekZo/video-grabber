@@ -395,6 +395,14 @@ test('quality/audio selection never pairs audio from a different HLS group', () 
   assert.throws(() => Hls.pickBest(m, base, { videoUrl: selected.url, audioUrl: new URL('en.m3u8', base).href }), /does not belong/);
 });
 
+test('refreshed audio URL falls back to the selected video group', () => {
+  const m = '#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Русский",DEFAULT=YES,URI="audio.m3u8?token=new"\n' +
+    '#EXT-X-STREAM-INF:BANDWIDTH=10,RESOLUTION=1280x720,AUDIO="a"\nvideo.m3u8';
+  const selected = Hls.pickBest(m, base, { videoUrl: new URL('video.m3u8', base).href,
+    audioUrl: new URL('audio.m3u8?token=old', base).href });
+  assert.equal(selected.audioUrl, new URL('audio.m3u8?token=new', base).href);
+});
+
 test('MP4 verification counts actual samples and catches truncated tracks despite full header duration', () => {
   const full = new hlsContext.FragmentedMp4([video.init, audio.init], 6);
   for (const part of video.fragments) full.fragment(0, part);
@@ -534,7 +542,7 @@ test('low-resource defaults prefer 720p without overriding an explicit quality',
 
 test('low-resource HLS uses two parallel requests, disk buffering and a disk-backed browser download', async () => {
   const disk = fakeDisk(), v = resourcesFor(video, 'video'), a = resourcesFor(audio, 'audio');
-  let inFlight = 0, maxInFlight = 0, savedBytes;
+  let inFlight = 0, maxInFlight = 0, savedBytes, savedOptions, savedType;
   const ctx = downloadContext(async (url, options) => {
     if (url === base) return new Response(master);
     if (url.includes('media.m3u8')) {
@@ -550,7 +558,7 @@ test('low-resource HLS uses two parallel requests, disk buffering and a disk-bac
   }, { low: '1' }, {
     navigator: { onLine: true, storage: disk.storage }, Blob,
     chrome: { downloads: {
-      download: async options => { savedBytes = Buffer.from(await (await fetch(options.url)).arrayBuffer()); return 1; },
+      download: async options => { savedOptions = options; const response = await fetch(options.url); savedType = response.headers.get('content-type'); savedBytes = Buffer.from(await response.arrayBuffer()); return 1; },
       search: async () => [{ state: 'complete', filename: 'lesson.mp4' }],
     } },
   });
@@ -561,6 +569,8 @@ test('low-resource HLS uses two parallel requests, disk buffering and a disk-bac
   assert.ok(ctx.api.sink.written > 0);
   ctx.api.setTarget({ type: 'downloads', saveAs: false });
   await ctx.api.finishDownloads();
+  assert.match(savedOptions.filename, /\.mp4$/);
+  assert.equal(savedType, 'video/mp4');
   assert.equal(disk.files.size, 0);
   verifyFile([savedBytes], 'low-resource-disk', ['video', 'audio']);
 });

@@ -5,29 +5,29 @@
 <title>Скачивание видео</title>
 <link rel="icon" href="icons/icon32.png">
 <style>
-  body { font: 17px/1.4 system-ui, "Segoe UI", sans-serif; max-width: 600px; margin: 28px auto; padding: 0 16px; color: #1a1a1a; background: #fff; }
-  h1 { font-size: 22px; margin: 0 0 2px; }
-  #name { color: #555; font-size: 16px; word-break: break-word; margin-bottom: 14px; }
-  #mediaType { display: table; margin: 0 0 14px; padding: 5px 10px; border-radius: 7px; background: #eef3f8; font-size: 15px; }
+  body { font: 15px/1.3 system-ui, "Segoe UI", sans-serif; max-width: 650px; margin: 16px auto; padding: 0 16px; color: #1a1a1a; background: #fff; }
+  h1 { font-size: 20px; margin: 0 0 2px; }
+  #name { color: #555; font-size: 15px; word-break: break-word; margin-bottom: 7px; }
+  #mediaType { display: table; margin: 0 0 7px; padding: 3px 8px; border-radius: 7px; background: #eef3f8; font-size: 14px; }
   #mediaType.audio { background: #eee7fa; color: #4b327d; font-weight: 600; }
   #verification { margin: 8px 0; color: #246c28; font-size: 15px; }
   #verification:empty { display: none; }
-  .bar { height: 16px; background: #e8e8e8; border-radius: 8px; overflow: hidden; }
+  .bar { height: 12px; background: #e8e8e8; border-radius: 8px; overflow: hidden; }
   .fill { height: 100%; width: 0; background: #2e7d32; transition: width .3s; }
-  #percent { font-size: 30px; font-weight: 700; margin: 8px 0 0; }
+  #percent { font-size: 24px; font-weight: 700; margin: 4px 0 0; }
   #status { color: #444; }
-  .box { margin-top: 14px; padding: 10px 12px; border-radius: 8px; font-size: 16px; }
+  .box { margin-top: 8px; padding: 8px 10px; border-radius: 8px; font-size: 15px; }
   .warn { background: #fff8e1; }
   #notice { display: none; background: #e3f2fd; }
   #notice.show { display: block; }
   #choose { background: #fff3e0; }
-  #choose p { margin: 0 0 10px; }
+  #choose p { margin: 0 0 6px; }
   #toDownloads { margin-left: 12px; color: #1565c0; }
   #pickStatus { margin-top: 8px; }
   #pickStatus:empty { display: none; }
   #pickStatus.err { color: #e65100; }
   .buttons { display: none; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
-  button { font: 600 17px system-ui, "Segoe UI", sans-serif; padding: 11px 18px; border: 0; border-radius: 10px; cursor: pointer; color: #fff; background: #2e7d32; }
+  button { font: 600 15px system-ui, "Segoe UI", sans-serif; padding: 8px 14px; border: 0; border-radius: 8px; cursor: pointer; color: #fff; background: #2e7d32; }
   button:hover { filter: brightness(.9); }
   button.secondary { background: #1e88e5; }
   button.orange { background: #ef6c00; }
@@ -44,7 +44,7 @@
   .alternative textarea { box-sizing: border-box; width: 100%; min-height: 95px; margin: 8px 0; padding: 8px; font: 13px/1.4 monospace; }
   .alternative p { margin: 8px 0; }
   [hidden] { display: none !important; }
-  #resourceMode { margin: 0 0 12px; color: #35663d; font-size: 14px; }
+  #resourceMode { margin: 0 0 7px; color: #35663d; font-size: 13px; }
   #resourceMode:empty { display: none; }
   body[data-low-resource="true"] .fill { transition: none; }
 </style>
@@ -58,12 +58,12 @@
   <div id="percent">0%</div>
   <div id="status">Подготовка…</div>
   <div id="verification" role="status"></div>
-  <div id="notice" class="box"></div>
   <div id="choose" class="box">
     <p id="chooseText"><b>Куда сохранить видео?</b> Выберите папку — например, флешку. Пока вы выбираете, видео уже скачивается.</p>
     <button id="pick" class="orange">📁 Выбрать папку</button><a href="#" id="toDownloads">или сохранить в «Загрузки»</a>
     <div id="pickStatus"></div>
   </div>
+  <div id="notice" class="box"></div>
   <div class="box warn">⚠ Не закрывайте эту вкладку, пока не появится надпись «Готово».</div>
   <div class="buttons">
     <button id="watch">▶ Посмотреть здесь</button>
