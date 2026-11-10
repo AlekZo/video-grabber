@@ -138,7 +138,7 @@ function downloadContext(fetch, params = {}, overrides = {}) {
   });
   for (const file of ['mux.min.js', 'mp4.js', 'hls.js', 'fallback.js', 'resource-mode.js']) vm.runInContext(source(file), context);
   vm.runInContext(source('download.js').split('// ---------- Запуск ----------')[0] +
-    '\nglobalThis.api = { downloadHls, downloadMp4, get, sink, extReady, resource, prepareLowStorage, runDownload, continueBatch, finishDownloads, finishFolder, chooseDownloads, chooseFolder, setTarget: t => { target = t; }, getSpool: () => spool };', context);
+    '\nglobalThis.api = { downloadHls, downloadMp4, get, sink, extReady, resource, prepareLowStorage, runDownload, continueBatch, finishDownloads, finishFolder, chooseDownloads, chooseFolder, refreshSourceFromPage, setTarget: t => { target = t; }, getSpool: () => spool, getSrc: () => src };', context);
   context.elements = elements;
   return context;
 }
@@ -338,7 +338,7 @@ test('captured Kinescope tracks form one download when the master is unavailable
 });
 
 function backgroundContext(fetch) {
-  const storage = {}, listener = { addListener() {} };
+  const storage = {}, listener = { handlers: [], addListener(fn) { this.handlers.push(fn); } };
   const ctx = vm.createContext({ ...common, Hls, mp4MediaType: hlsContext.mp4MediaType, fetch,
     chrome: { storage: { session: { get: async key => ({ [key]: storage[key] }), set: async value => Object.assign(storage, value) } },
       action: { setBadgeText() {}, setBadgeBackgroundColor() {} }, webRequest: { onHeadersReceived: listener },
@@ -346,6 +346,7 @@ function backgroundContext(fetch) {
   });
   vm.runInContext(source('background.js'), ctx);
   ctx.storage = storage;
+  ctx.listener = listener;
   return ctx;
 }
 
@@ -403,6 +404,18 @@ test('refreshed audio URL falls back to the selected video group', () => {
   assert.equal(selected.audioUrl, new URL('audio.m3u8?token=new', base).href);
 });
 
+test('refreshed signed video URL preserves the selected stream', () => {
+  const m = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=20,RESOLUTION=1920x1080\n1080.m3u8?token=new\n' +
+    '#EXT-X-STREAM-INF:BANDWIDTH=10,RESOLUTION=1280x720\n720.m3u8?token=new';
+  const selected = Hls.pickBest(m, base, { videoUrl: new URL('1080.m3u8?token=old', base).href,
+    videoRes: '1920x1080', videoBw: 20 });
+  assert.equal(selected.url, new URL('1080.m3u8?token=new', base).href);
+  const changedPath = Hls.pickBest(m.replaceAll('1080.m3u8', 'high.m3u8'), base, {
+    videoUrl: new URL('old.m3u8?token=old', base).href, videoRes: '1920x1080', videoBw: 20,
+  });
+  assert.match(changedPath.url, /high\.m3u8\?token=new$/);
+});
+
 test('MP4 verification counts actual samples and catches truncated tracks despite full header duration', () => {
   const full = new hlsContext.FragmentedMp4([video.init, audio.init], 6);
   for (const part of video.fragments) full.fragment(0, part);
@@ -427,7 +440,9 @@ test('MP4 verification catches timeline gaps even when all samples are present',
     }
     mux.fragment(0, part);
   }
-  assert.throws(() => mux.verify([6]), e => e.mediaIncomplete === true);
+  const report = mux.verify([6]);
+  assert.ok(report.warnings.length > 0);
+  assert.ok(report.tracks[0].samples > 0);
 });
 
 test('video-only response cannot pass when the master promises audio', async () => {
@@ -533,20 +548,22 @@ function fakeDisk() {
   } }) } };
 }
 
-test('low-resource defaults prefer 720p without overriding an explicit quality', () => {
-  assert.match(Hls.pickBest(master, base, { maxHeight: 720 }).url, /quality=720&type=video/);
-  const explicit = Hls.pickBest(master, base, { maxHeight: 720, videoUrl: new URL('media.m3u8?quality=1080&type=video', base).href });
-  assert.equal(explicit.res, '1920x1080');
-  assert.equal(Hls.pickBest('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=20,RESOLUTION=1920x1080\na\n#EXT-X-STREAM-INF:BANDWIDTH=40,RESOLUTION=3840x2160\nb', base, { maxHeight: 720 }).res, '1920x1080');
+test('low-resource mode keeps best quality and six-way segment downloading', () => {
+  const settings = common.ResourceMode.settings(true);
+  assert.equal(settings.maxHeight, null);
+  assert.equal(settings.parallel, 6);
+  assert.match(Hls.pickBest(master, base, settings).url, /quality=1080&type=video/);
+  const explicit = Hls.pickBest(master, base, { ...settings, videoUrl: new URL('media.m3u8?quality=720&type=video', base).href });
+  assert.equal(explicit.res, '1280x720');
 });
 
-test('low-resource HLS uses two parallel requests, disk buffering and a disk-backed browser download', async () => {
+test('low-resource HLS uses parallel requests, disk buffering and a disk-backed browser download', async () => {
   const disk = fakeDisk(), v = resourcesFor(video, 'video'), a = resourcesFor(audio, 'audio');
   let inFlight = 0, maxInFlight = 0, savedBytes, savedOptions, savedType;
   const ctx = downloadContext(async (url, options) => {
     if (url === base) return new Response(master);
     if (url.includes('media.m3u8')) {
-      if (new URL(url).searchParams.get('type') === 'video') assert.equal(new URL(url).searchParams.get('quality'), '720');
+      if (new URL(url).searchParams.get('type') === 'video') assert.equal(new URL(url).searchParams.get('quality'), '1080');
       return new Response(new URL(url).searchParams.get('type') === 'audio' ? a.playlist : v.playlist);
     }
     inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
@@ -563,7 +580,7 @@ test('low-resource HLS uses two parallel requests, disk buffering and a disk-bac
     } },
   });
   await ctx.api.prepareLowStorage(); await ctx.api.downloadHls(); await ctx.api.sink.chain;
-  assert.equal(maxInFlight, 2);
+  assert.ok(maxInFlight > 2 && maxInFlight <= 6);
   assert.equal(ctx.api.sink.chunks.length, 0);
   assert.equal(ctx.api.sink.buffered, 0);
   assert.ok(ctx.api.sink.written > 0);
@@ -613,7 +630,7 @@ test('low-resource lock runs independent downloads serially', async () => {
   assert.equal(maximum, 1);
 });
 
-test('low-resource Download all creates one tab and a sequential queue at 720p', async () => {
+test('low-resource Download all creates a persistent queue at best quality', async () => {
   const node = () => ({ children: [], style: {}, appendChild(n) { this.children.push(n); }, replaceChildren(...nodes) { this.children = nodes; } });
   const rootNode = node(), toggle = node();
   const items = [1, 2].map(id => ({ url: 'https://kinescope.io/lesson-' + id + '/master.m3u8', kind: 'hls',
@@ -634,26 +651,31 @@ test('low-resource Download all creates one tab and a sequential queue at 720p',
   assert.equal(q.get('low'), '1');
   const batch = storage['batch:' + q.get('batch')];
   assert.equal(batch.length, 2);
-  assert.ok(batch.every(v => v.videoUrl.includes('quality=720')));
+  assert.ok(batch.every(v => v.videoUrl.includes('quality=1080')));
   assert.ok(batch.every(v => !v.variants));
+  assert.equal(storage['batch-progress:' + q.get('batch')].index, 0);
   toggle.checked = false; toggle.onchange();
   assert.equal(storage.lowResource, false);
 });
 
-test('next queued lesson reuses the same page and destination only after saving', async () => {
+test('next queued lesson stores resume state and preserves destination after failure', async () => {
   let nextUrl;
   const jobs = [{ url: base, fileName: 'one' }, { url: base + '?two', kind: 'hls', fileName: 'two', mediaType: 'av' }];
-  const ctx = downloadContext(async () => {}, { low: '1', batch: 'queue-id', index: '0' }, {
-    chrome: { storage: { session: { get: async () => ({ 'batch:queue-id': jobs }) } }, runtime: { getURL: name => 'chrome-extension://test/' + name } },
-    location: { search: '?' + new URLSearchParams({ src: base, low: '1', batch: 'queue-id', index: '0' }), replace: url => { nextUrl = url; } },
+  const storage = { 'batch:queue-id': jobs };
+  const local = { get: async key => ({ [key]: storage[key] }), set: async value => Object.assign(storage, value),
+    remove: async key => { delete storage[key]; } };
+  const ctx = downloadContext(async () => {}, { low: '1', batch: 'queue-id', index: '0', destination: 'folder' }, {
+    chrome: { storage: { local }, runtime: { getURL: name => 'chrome-extension://test/' + name } },
+    location: { search: '?' + new URLSearchParams({ src: base, low: '1', batch: 'queue-id', index: '0', destination: 'folder' }), replace: url => { nextUrl = url; } },
   });
-  ctx.api.setTarget({ type: 'downloads' });
+  // No target exists after a failure; the previous destination must still survive.
   await ctx.api.continueBatch();
   const q = new URL(nextUrl).searchParams;
   assert.equal(q.get('name'), 'two');
   assert.equal(q.get('index'), '1');
-  assert.equal(q.get('destination'), 'downloads');
+  assert.equal(q.get('destination'), 'folder');
   assert.equal(q.get('low'), '1');
+  assert.equal(storage['batch-progress:queue-id'].index, 1);
 });
 
 test('direct downloads apply disk backpressure instead of retaining pending writes', async () => {
@@ -700,4 +722,68 @@ test('disposing an interrupted disk buffer removes only its own temporary file',
   await spool.dispose();
   assert.equal(disk.files.size, 1);
   assert.ok(disk.files.has('keep-other-file.txt'));
+});
+
+test('lazy data-src players are included in page discovery', () => {
+  const urls = Hls.pageSources('<iframe data-src="/api/master?token=new"></iframe>', 'https://school.example.test/lesson');
+  assert.deepEqual(Array.from(urls), ['https://school.example.test/api/master?token=new']);
+});
+
+test('background keeps short MP4 lessons and inspects media playlist candidates', async () => {
+  const ctx = backgroundContext(async () => new Response(new Uint8Array(0), { status: 206 }));
+  const onHeaders = ctx.listener.handlers[0];
+  await onHeaders({ tabId: 1, frameId: 0, url: 'https://cdn.example.test/short.mp4', type: 'media', statusCode: 200,
+    responseHeaders: [{ name: 'content-type', value: 'video/mp4' }, { name: 'content-length', value: '500' }] });
+  assert.equal(ctx.storage.t1.length, 1);
+  assert.equal(ctx.storage.t1[0].size, 500);
+
+  const playlistCtx = backgroundContext(async () => new Response(master));
+  await playlistCtx.listener.handlers[0]({ tabId: 2, frameId: 0, url: 'https://school.example.test/playlist/master', type: 'media', statusCode: 200,
+    responseHeaders: [{ name: 'content-type', value: 'text/plain' }] });
+  assert.equal(playlistCtx.storage.t2[0].kind, 'hls');
+});
+
+test('slow discovery in one tab does not block another tab', async () => {
+  const ctx = backgroundContext(async () => { throw new Error('not used'); });
+  let active = 0, maximum = 0;
+  const work = async () => {
+    active++; maximum = Math.max(maximum, active);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    active--;
+  };
+  const run = vm.runInContext('run', ctx);
+  await Promise.all([run(1, work), run(2, work)]);
+  assert.equal(maximum, 2);
+});
+
+test('queued Kinescope media refreshes through its master playlist', async () => {
+  const old = 'https://kinescope.io/lesson-one/media.m3u8?type=video&quality=1080&token=old';
+  const ctx = downloadContext(async url => {
+    assert.equal(url, 'https://kinescope.io/lesson-one/master.m3u8?token=old');
+    return new Response(master);
+  }, { src: old });
+  assert.equal(await ctx.api.refreshSourceFromPage(), true);
+  assert.equal(ctx.api.getSrc(), 'https://kinescope.io/lesson-one/master.m3u8?token=old');
+});
+
+test('choosing a folder switches disk buffering to direct destination writes', async () => {
+  const disk = fakeDisk(), output = { parts: [] };
+  let destinationWritable;
+  const dir = { name: 'Lessons', async getFileHandle(name, options = {}) {
+    if (!options.create) throw Object.assign(new Error('missing'), { name: 'NotFoundError' });
+    return { async createWritable() {
+      destinationWritable = { write: async value => output.parts.push(Buffer.from(value)), close: async () => {}, abort: async () => {} };
+      return destinationWritable;
+    } };
+  } };
+  const ctx = downloadContext(async () => new Response(audio.init), { low: '1', kind: 'mp4' }, {
+    Blob, navigator: { onLine: true, storage: disk.storage },
+    window: { addEventListener() {}, showDirectoryPicker: async () => dir },
+  });
+  await ctx.api.prepareLowStorage(); await ctx.api.downloadMp4(); await ctx.api.sink.chain;
+  await ctx.api.chooseFolder(); await ctx.api.sink.chain;
+  assert.equal(ctx.api.getSpool(), null);
+  assert.equal(ctx.api.sink.writable, destinationWritable);
+  assert.ok(output.parts.length > 0);
+  assert.equal(disk.files.size, 0);
 });

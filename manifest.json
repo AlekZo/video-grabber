@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Скачать видео",
-  "version": "1.8.1",
+  "version": "1.8.2",
   "description": "Находит видео на странице и сохраняет его на компьютер в формате MP4 одной кнопкой.",
   "permissions": ["webRequest", "storage", "tabs", "downloads", "downloads.open", "scripting"],
   "host_permissions": ["<all_urls>"],

@@ -47,8 +47,33 @@
         } else pool = pool.length ? [pool.reduce((a, b) => b.bw < a.bw ? b : a)] : [];
       }
     }
-    const best = preferences.videoUrl ? variants.find(v => v.url === preferences.videoUrl) :
-      pool.reduce((a, b) => !a || b.bw > a.bw ? b : a, null);
+    const bestOf = list => list.reduce((a, b) => !a || b.bw > a.bw ? b : a, null);
+    let best = preferences.videoUrl ? variants.find(v => v.url === preferences.videoUrl) : null;
+    // Signed URLs often change when a master is refreshed. Preserve the selected
+    // stream by stable attributes instead of requiring the expired URL to exist.
+    if (!best && preferences.videoUrl) {
+      const previousKinescope = kinescopeInfo(preferences.videoUrl);
+      let previous = null;
+      try { previous = new URL(preferences.videoUrl); } catch (e) { /* invalid old URL */ }
+      best = variants.find(v => {
+        const currentKinescope = kinescopeInfo(v.url);
+        if (previousKinescope && currentKinescope) {
+          return currentKinescope.id === previousKinescope.id && currentKinescope.role === previousKinescope.role &&
+            (!previousKinescope.quality || currentKinescope.quality === previousKinescope.quality);
+        }
+        if (!previous) return false;
+        try {
+          const current = new URL(v.url);
+          return current.origin === previous.origin && current.pathname === previous.pathname;
+        } catch (e) { return false; }
+      });
+      if (!best && preferences.videoRes) best = pool.find(v => v.res === preferences.videoRes);
+      if (!best && preferences.videoBw) {
+        const target = Number(preferences.videoBw);
+        best = pool.reduce((a, b) => !a || Math.abs(b.bw - target) < Math.abs(a.bw - target) ? b : a, null);
+      }
+    }
+    if (!best) best = bestOf(pool);
     if (!best) return null;
     const audio = renditions.filter(r => r.type === 'AUDIO' && r.group === best.audio);
     const requestedAudio = preferences.audioUrl && audio.find(r => r.url === preferences.audioUrl);
@@ -89,9 +114,9 @@
         if (allowedPageSource(url.href, base)) result.add(url.href);
       } catch (e) { /* это не ссылка */ }
     };
-    for (const m of html.matchAll(/\b(?:data-master|data-video-src)\s*=\s*["']([^"']+)["']/gi)) add(m[1]);
+    for (const m of html.matchAll(/\b(?:data-master|data-video-src|data-src)\s*=\s*["']([^"']+)["']/gi)) add(m[1]);
     for (const m of html.matchAll(/["']([^"'<>\s]*\.m3u8(?:\?[^"'<>\s]*)?)["']/gi)) add(m[1]);
-    return [...result].slice(0, 30);
+    return [...result].slice(0, 100);
   }
   function allowedPageSource(value, base) {
     try {

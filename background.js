@@ -26,9 +26,14 @@ function totalSize(headers) {
   return Number(m ? m[1] : header(headers, 'content-length')) || 0;
 }
 
-// Очередь, чтобы параллельные события не затирали друг друга.
-let queue = Promise.resolve();
-const run = fn => (queue = queue.then(fn).catch(console.error));
+// События одной вкладки записываем по очереди, но медленный сайт не блокирует остальные.
+const queues = new Map();
+const run = (tabId, fn) => {
+  const previous = queues.get(tabId) || Promise.resolve();
+  const next = previous.then(fn).catch(console.error);
+  queues.set(tabId, next);
+  return next;
+};
 
 async function inspectUrl(url, credentials = 'include') {
   const ctrl = new AbortController(), timer = setTimeout(() => ctrl.abort(), 12000);
@@ -93,10 +98,10 @@ async function addItem(tabId, item) {
   const index = list.findIndex(v => v.url === item.url);
   if (index >= 0) list[index] = { ...list[index], ...item };
   else list.unshift(item);
-  if (list.length > 40) {
-    // Сохраняем мастера и плейлисты раньше исходных файлов, запрашиваемых плеером.
+  if (list.length > 200) {
+    // Храним достаточно элементов для длинных курсов; мастера важнее исходных файлов.
     list.sort((a, b) => Number(!!b.variants?.length) - Number(!!a.variants?.length) || Number(b.kind === 'hls') - Number(a.kind === 'hls'));
-    list.splice(40);
+    list.splice(200);
   }
   await chrome.storage.session.set({ [key]: list });
   const visible = Hls.visibleItems(list);
@@ -154,7 +159,7 @@ async function checkUrl(tabId, url, frameId) {
     const { mime: type, size, text = '' } = response;
     if (text.trimStart().startsWith('#EXTM3U')) return addHls(tabId, url, frameId, text);
     if ((/^video\//i.test(type) && !/mp2t/i.test(type)) || /^audio\/(mp4|x-m4a)/i.test(type)) {
-      if (size && size < 1024 * 1024) return;
+      // Не отбрасываем короткие уроки только из-за размера файла.
       return addFile(tabId, { url, kind: 'mp4', mime: type, size, frameId, time: Date.now() });
     }
     // Один уровень поиска, только текущий сайт и известные хосты плееров.
@@ -176,14 +181,13 @@ chrome.webRequest.onHeadersReceived.addListener(
     const mime = header(d.responseHeaders, 'content-type');
     const kind = detect(d.url, mime);
 
-    if (kind === 'hls') return run(() => addHls(d.tabId, d.url, d.frameId));
+    if (kind === 'hls') return run(d.tabId, () => addHls(d.tabId, d.url, d.frameId));
     if (kind === 'mp4') {
       const size = totalSize(d.responseHeaders);
-      if (size && size < 1024 * 1024) return; // мелочь (превью, реклама) не показываем
-      return run(() => addFile(d.tabId, { url: d.url, kind, mime, size, frameId: d.frameId, time: Date.now() }));
+      return run(d.tabId, () => addFile(d.tabId, { url: d.url, kind, mime, size, frameId: d.frameId, time: Date.now() }));
     }
-    if (d.type === 'xmlhttprequest' && CANDIDATE_RE.test(d.url) && !SEGMENT_RE.test(new URL(d.url).pathname)) {
-      run(() => checkUrl(d.tabId, d.url, d.frameId));
+    if (['xmlhttprequest', 'media', 'other'].includes(d.type) && CANDIDATE_RE.test(d.url) && !SEGMENT_RE.test(new URL(d.url).pathname)) {
+      return run(d.tabId, () => checkUrl(d.tabId, d.url, d.frameId));
     }
   },
   { urls: ['<all_urls>'] },
@@ -193,7 +197,7 @@ chrome.webRequest.onHeadersReceived.addListener(
 // Окно расширения присылает адреса, найденные прямо на странице.
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   if (msg && msg.type === 'check') {
-    Promise.all(msg.urls.map(u => run(() => checkUrl(msg.tabId, u.url, u.frameId)))).then(() => reply(true));
+    Promise.all(msg.urls.map(u => run(msg.tabId, () => checkUrl(msg.tabId, u.url, u.frameId)))).then(() => reply(true));
     return true;
   }
 });
@@ -202,11 +206,11 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
 chrome.tabs.onUpdated.addListener((tabId, info) => {
   if (info.status === 'loading' && info.url) {
     for (const key of masterAttempts.keys()) if (key.startsWith(tabId + ':')) masterAttempts.delete(key);
-    run(() => chrome.storage.session.remove('t' + tabId));
+    run(tabId, () => chrome.storage.session.remove('t' + tabId));
     chrome.action.setBadgeText({ tabId, text: '' });
   }
 });
 chrome.tabs.onRemoved.addListener(tabId => {
   for (const key of masterAttempts.keys()) if (key.startsWith(tabId + ':')) masterAttempts.delete(key);
-  run(() => chrome.storage.session.remove('t' + tabId));
+  run(tabId, () => chrome.storage.session.remove('t' + tabId)).finally(() => queues.delete(tabId));
 });

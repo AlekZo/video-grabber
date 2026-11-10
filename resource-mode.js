@@ -1,11 +1,13 @@
 // Экономный режим: настройки, очередь в одной вкладке и временный файл вместо RAM.
 (function (g) {
-  const settings = enabled => ({ enabled: !!enabled, parallel: enabled ? 2 : 6,
-    maxHeight: enabled ? 720 : null, maxPartBytes: enabled ? 32 * 1024 * 1024 : Infinity });
+  // Disk buffering reduces RAM use without lowering quality or network speed.
+  const settings = enabled => ({ enabled: !!enabled, parallel: 6,
+    maxHeight: null, maxPartBytes: enabled ? 32 * 1024 * 1024 : Infinity });
   function jobParams(item, name, options = {}) {
     const q = new URLSearchParams({ src: item.url, kind: item.kind || 'hls', name,
       media: item.mediaType || 'unknown', low: options.enabled ? '1' : '0' });
-    for (const [key, value] of Object.entries({ audio: item.audioUrl, video: item.videoUrl, page: item.pageUrl,
+    for (const [key, value] of Object.entries({ audio: item.audioUrl, video: item.videoUrl,
+      vres: item.videoRes, vbw: item.videoBw, page: item.pageUrl,
       batch: options.batch, index: options.index, destination: options.destination })) {
       if (value !== undefined && value !== null && value !== '') q.set(key, value);
     }
@@ -19,6 +21,10 @@
       if (cleanStale && dir.values) {
         for await (const entry of dir.values()) {
           if (entry.kind === 'file' && /^job-[0-9a-f-]{36}\.part$/i.test(entry.name)) {
+            // Не удаляем файл другой вкладки, которая ждёт выбора места сохранения.
+            const file = await entry.getFile?.().catch(() => null);
+            if (file && Date.now() - file.lastModified < 24 * 60 * 60 * 1000) continue;
+            if (!file && entry.getFile) continue;
             await dir.removeEntry(entry.name).catch(e => { if (!['NotFoundError', 'NoModificationAllowedError'].includes(e.name)) throw e; });
           }
         }

@@ -1,10 +1,11 @@
 // Страница скачивания: качает видео и записывает его прямо в папку, которую выбрал пользователь.
 
 const params = new URLSearchParams(location.search);
-const src = params.get('src');
+let src = params.get('src');
 const kind = params.get('kind') || 'hls';
 const name = params.get('name') || 'Видео';
 const resource = ResourceMode.settings(params.get('low') === '1');
+const batchStore = globalThis.chrome?.storage?.local || globalThis.chrome?.storage?.session;
 
 const $ = id => document.getElementById(id);
 $('name').textContent = name;
@@ -24,6 +25,51 @@ function updateExternalCommand() {
 }
 updateExternalCommand();
 
+// Перед запуском отложенного урока заменяем старую подписанную ссылку свежей.
+async function refreshSourceFromPage() {
+  const identity = Hls.kinescopeInfo(src);
+  const candidates = [];
+  if (identity && identity.role !== 'master') candidates.push(identity.masterUrl);
+  if (externalPlan.pageUrl) {
+    const ctrl = new AbortController();
+    try {
+      const response = await withTimeout(fetch(externalPlan.pageUrl, { credentials: 'include', signal: ctrl.signal }), 20000, ctrl);
+      if (response.ok) {
+        const html = await withTimeout(response.text(), 20000, ctrl);
+        let original = null;
+        try { original = new URL(src); } catch (e) { /* старый адрес мог быть повреждён */ }
+        for (const candidate of Hls.pageSources(html, response.url || externalPlan.pageUrl)) {
+          const info = Hls.kinescopeInfo(candidate);
+          const samePlayer = identity && info && info.id === identity.id && (info.role === 'master' || info.role === identity.role);
+          let samePath = false;
+          try {
+            const url = new URL(candidate);
+            samePath = original && url.origin === original.origin && url.pathname === original.pathname;
+          } catch (e) { /* не HTTP-источник */ }
+          if (samePlayer || samePath) candidates.push(candidate);
+        }
+      }
+    } catch (e) { /* используем исходную ссылку, если страница недоступна */ }
+    finally { ctrl.abort(); }
+  }
+  for (const candidate of [...new Set(candidates)]) {
+    if (!candidate || candidate === src) continue;
+    const ctrl = new AbortController();
+    try {
+      const response = await withTimeout(fetch(candidate, { credentials: 'include', signal: ctrl.signal }), 20000, ctrl);
+      if (!response.ok) continue;
+      const text = await withTimeout(response.text(), 20000, ctrl);
+      if (!text.trimStart().startsWith('#EXTM3U')) continue;
+      src = response.url || candidate;
+      externalPlan.url = src;
+      updateExternalCommand();
+      return true;
+    } catch (e) { /* пробуем следующий свежий адрес */ }
+    finally { ctrl.abort(); }
+  }
+  return false;
+}
+
 // Chrome, Edge и Яндекс.Браузер умеют выбирать папку. Firefox — нет: там откроется обычное «Сохранить как».
 const canPick = typeof window.showDirectoryPicker === 'function';
 
@@ -33,7 +79,7 @@ let resolveCompleted;
 const completed = new Promise(resolve => { resolveCompleted = resolve; });
 if (resource.enabled) {
   document.body.dataset.lowResource = 'true';
-  $('resourceMode').textContent = '🌿 Экономный режим: до 720p по умолчанию, 2 части одновременно, запись на диск.';
+  $('resourceMode').textContent = '🌿 Экономный режим: лучшее качество, 6 частей одновременно, запись на диск.';
 }
 let mediaType = 'unknown';
 const isAudio = () => mediaType === 'audio';
@@ -121,6 +167,13 @@ function fail(err) {
   $('tech').textContent = String(err && (err.stack || err.message || err));
   ['open', 'folder', 'watch'].forEach(id => { $(id).style.display = 'none'; });
   $('retry').onclick = () => location.reload();
+  if (params.get('batch')) {
+    $('skip').style.display = 'inline-block';
+    $('skip').onclick = () => {
+      $('skip').disabled = true;
+      continueBatch().catch(e => { $('skip').disabled = false; console.error(e); });
+    };
+  }
   if (err.userMessage === MSG.drm) $('alternative').hidden = true;
   document.title = 'Не получилось: ' + name;
   resolveCompleted();
@@ -265,10 +318,24 @@ async function chooseFolder(reuse = false) {
     return fail(writeError(e));
   }
   if (failed) { await target.writable.abort().catch(() => {}); await dir.removeEntry(target.fileName).catch(() => {}); return; }
-  if (!resource.enabled) sink.attach(target.writable, (d, t) => {
-    const text = `Сохраняю в папку «${dir.name}»… ${Math.floor(d / t * 100)}%`;
-    if (downloadDone) progress(d / t, text, false); else pickStatus(text);
-  }).then(() => { if (!downloadDone) pickStatus(''); maybeFinish(); }, () => {});
+  const onCopyProgress = (d, t) => {
+    const fraction = t ? d / t : 1;
+    const text = `Переношу скачанное в папку «${dir.name}»… ${Math.floor(fraction * 100)}%`;
+    if (downloadDone) progress(fraction, text, false); else pickStatus(text);
+  };
+  if (resource.enabled && spool) {
+    const currentSpool = spool;
+    sink.queue(async () => {
+      const file = await currentSpool.file();
+      await currentSpool.copyTo(target.writable, onCopyProgress);
+      // После переноса новые сетевые данные пишутся сразу в выбранную папку.
+      sink.writable = target.writable;
+      sink.written = file.size;
+      spool = null;
+      await currentSpool.dispose();
+    }).then(() => { if (!downloadDone) pickStatus(''); maybeFinish(); }, () => {});
+  } else if (!resource.enabled) sink.attach(target.writable, onCopyProgress)
+    .then(() => { if (!downloadDone) pickStatus(''); maybeFinish(); }, () => {});
   maybeFinish();
 }
 
@@ -375,11 +442,19 @@ async function continueBatch() {
   const id = params.get('batch');
   if (!id) return;
   const key = 'batch:' + id;
-  const jobs = (await chrome.storage.session.get(key))[key];
+  if (!batchStore) throw new Error('Batch storage is unavailable');
+  const jobs = (await batchStore.get(key))[key];
   const next = (Number(params.get('index')) || 0) + 1;
-  if (!jobs?.[next]) { await chrome.storage.session.remove(key); return; }
+  if (!jobs?.[next]) {
+    await batchStore.remove(key);
+    await batchStore.remove('batch-progress:' + id);
+    return;
+  }
+  const previousDestination = params.get('destination');
+  const destination = target?.type || (['folder', 'downloads'].includes(previousDestination) ? previousDestination : null);
+  await batchStore.set({ ['batch-progress:' + id]: { index: next, updatedAt: Date.now() } });
   const q = ResourceMode.jobParams(jobs[next], jobs[next].fileName, { enabled: resource.enabled,
-    batch: id, index: next, destination: target.type === 'folder' ? 'folder' : 'downloads' });
+    batch: id, index: next, destination });
   location.replace(chrome.runtime.getURL('download.html?' + q));
 }
 
@@ -583,7 +658,8 @@ async function downloadHls() {
     if (!selected || selected.id !== identity.id || selected.role !== 'video') throw userError(MSG.unsupported, 'Video belongs to another player');
     start = requestedVideo;
   }
-  const video = await resolvePlaylist(start, { videoUrl: requestedVideo, audioUrl: requestedAudio });
+  const video = await resolvePlaylist(start, { videoUrl: requestedVideo, audioUrl: requestedAudio,
+    videoRes: params.get('vres') || '', videoBw: Number(params.get('vbw')) || 0 });
   if (!video.audioUrl && requestedAudio) {
     const audio = Hls.kinescopeInfo(requestedAudio);
     if (!identity || !audio || identity.id !== audio.id || audio.role !== 'audio') throw userError(MSG.unsupported, 'Audio belongs to another player');
@@ -663,17 +739,22 @@ async function downloadHls() {
     const report = muxer.verify(streams.map(s => s.duration));
     const hasVideo = report.tracks.some(t => t.kind === 'vide'), hasAudio = report.tracks.some(t => t.kind === 'soun');
     $('verification').textContent = `✓ Проверено: ${hasVideo && hasAudio ? 'изображение и звук' : hasAudio ? 'аудиодорожка' : 'видеодорожка'}, ${Math.round(report.duration)} сек.`;
+    if (report.warnings.length) $('verification').textContent += ' ⚠ Разрывы временных меток; проверьте воспроизведение. ' + report.warnings.join(' ');
   }
 }
 
 async function runDownload() {
   const work = async () => {
     if (stopped) return;
-    if (params.get('batch') && resource.enabled) {
+    if (params.get('batch')) {
       try {
         const key = 'batch:' + params.get('batch');
-        const jobs = (await chrome.storage.session.get(key))[key];
+        const jobs = batchStore && (await batchStore.get(key))[key];
         if (jobs?.length) $('resourceMode').textContent += ` Ролик ${(Number(params.get('index')) || 0) + 1} из ${jobs.length}.`;
+        if (externalPlan.pageUrl || Hls.kinescopeInfo(src)) {
+          $('status').textContent = 'Обновляю ссылку на урок…';
+          await refreshSourceFromPage();
+        }
       } catch (e) { console.warn(e); }
     }
     if (resource.enabled) await prepareLowStorage(true);
@@ -682,13 +763,14 @@ async function runDownload() {
     $('status').textContent = 'Подготовка…';
     await (kind === 'mp4' ? downloadMp4() : downloadHls());
     await onDownloaded();
-    if (resource.enabled) await completed; // следующий ролик начнётся после сохранения, а не только скачивания
   };
   if (resource.enabled) {
     if (!navigator.locks?.request) throw userError(MSG.diskBuffer, 'Web Locks unavailable');
-    return ResourceMode.serial(navigator.locks, work, () => {
-      $('status').textContent = 'Жду своей очереди. В экономном режиме скачивается один ролик за раз.';
+    await ResourceMode.serial(navigator.locks, work, () => {
+      $('status').textContent = 'Жду своей очереди. Сейчас скачивается другой ролик.';
     });
+    // Выбор папки не удерживает сетевую очередь других загрузок.
+    return completed;
   }
   return work();
 }

@@ -40,13 +40,15 @@ function scanPage() {
 
   document.querySelectorAll('[data-master]').forEach(e => add(e.getAttribute('data-master'), e));
   document.querySelectorAll('[data-video-src]').forEach(e => add(e.getAttribute('data-video-src'), e));
+  // GetCourse sometimes keeps a lazy player URL in data-src instead of src.
+  document.querySelectorAll('video[data-src], source[data-src], iframe[data-src]').forEach(e => add(e.getAttribute('data-src'), e));
   if (/(^|\.)kinescope\.io$/i.test(location.hostname) && /^\/embed\//.test(location.pathname)) add(location.href, null);
   document.querySelectorAll('video').forEach(v => {
     add(v.getAttribute('src'), v);
     if (v.currentSrc) add(v.currentSrc, v);
-    v.querySelectorAll('source').forEach(s => add(s.getAttribute('src'), v));
+    v.querySelectorAll('source').forEach(s => { add(s.getAttribute('src'), v); add(s.getAttribute('data-src'), v); });
   });
-  const re = /m3u8|playlist|master|manifest|\/(144|240|360|480|540|576|720|1080|1440|2160)p?(\?|#|$)/i;
+  const re = /m3u8|playlist|master|manifest|\.(mp4|webm|mov)(\?|#|$)|\/(144|240|360|480|540|576|720|1080|1440|2160)p?(\?|#|$)/i;
   performance.getEntriesByType('resource').forEach(e => { if (re.test(e.name)) add(e.name, null); });
 
   const frames = isTop
@@ -95,8 +97,11 @@ async function readItems(tabId, meta) {
   return items;
 }
 
-function startDownload(v, fileName, active, batch = null) {
-  const q = ResourceMode.jobParams(v, fileName, { enabled: lowResource, batch, index: batch ? 0 : null });
+async function startDownload(v, fileName, active, batch = null, index = 0) {
+  const q = ResourceMode.jobParams(v, fileName, { enabled: lowResource, batch, index: batch ? index : null });
+  if (batch) await (chrome.storage.local || chrome.storage.session).set({
+    ['batch-progress:' + batch]: { index, updatedAt: Date.now() },
+  });
   return chrome.tabs.create({ url: chrome.runtime.getURL('download.html?' + q), active });
 }
 
@@ -109,6 +114,29 @@ function startDownload(v, fileName, active, batch = null) {
     Promise.resolve(chrome.storage.local?.set({ lowResource })).catch(console.warn);
     resetQuality.forEach(reset => reset());
   };
+  const resume = document.getElementById('resume');
+  try {
+    const stored = await chrome.storage.local?.get(null);
+    const openTabs = await chrome.tabs.query({});
+    for (const [key, jobs] of Object.entries(stored || {})) {
+      if (!key.startsWith('batch:') || !Array.isArray(jobs)) continue;
+      const id = key.slice(6), progress = stored['batch-progress:' + id];
+      const index = Math.max(0, Math.min(Number(progress?.index) || 0, jobs.length - 1)), job = jobs[index];
+      const alreadyOpen = openTabs.some(t => {
+        try { return new URL(t.url).searchParams.get('batch') === id; } catch (e) { return false; }
+      });
+      if (!job || alreadyOpen) continue;
+      const button = document.createElement('button');
+      button.className = 'resume';
+      button.textContent = `↻ Продолжить очередь (${index + 1} из ${jobs.length})`;
+      button.onclick = async () => {
+        button.disabled = true;
+        try { await startDownload(job, job.fileName, true, id, index); window.close(); }
+        catch (e) { button.disabled = false; console.error(e); }
+      };
+      resume.appendChild(button);
+    }
+  } catch (e) { console.warn(e); }
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   root.innerHTML = '<h1>Ищу видео и аудио…</h1>';
 
@@ -135,9 +163,11 @@ function startDownload(v, fileName, active, batch = null) {
       <h1>Видео пока не найдено</h1>
       <ol>
         <li>Нажмите ▶ на видео, чтобы оно начало играть.</li>
-        <li>Снова нажмите на красный значок со стрелкой.</li>
+        <li>Нажмите «Найти ещё раз» через пару секунд.</li>
         <li>Если не помогло — обновите страницу (клавиша F5) и повторите.</li>
-      </ol>`;
+      </ol>
+      <button id="scanAgain" type="button">↻ Найти ещё раз</button>`;
+    document.getElementById('scanAgain').onclick = () => location.reload();
     return;
   }
 
@@ -151,7 +181,12 @@ function startDownload(v, fileName, active, batch = null) {
 
   const h1 = document.createElement('h1');
   h1.textContent = items.length > 1 ? 'Найдено файлов: ' + items.length : items[0].mediaType === 'audio' ? 'Аудио найдено' : items[0].mediaType === 'unknown' ? 'Файл найден' : 'Видео найдено';
-  root.replaceChildren(h1);
+  const scanAgain = document.createElement('button');
+  scanAgain.type = 'button';
+  scanAgain.className = 'secondary';
+  scanAgain.textContent = '↻ Найти ещё раз';
+  scanAgain.onclick = () => location.reload();
+  root.replaceChildren(h1, scanAgain);
   const selections = new Map();
 
   if (items.length > 1) {
@@ -166,8 +201,9 @@ function startDownload(v, fileName, active, batch = null) {
           const jobs = items.map((v, i) => ({ ...v, ...selections.get(v.url), fileName: fileOf(v, i) }));
           // Только необходимые для загрузки поля: не сохраняем заново длинные списки сегментов.
           const queue = jobs.map(v => ({ url: v.url, kind: v.kind, mediaType: v.mediaType, audioUrl: v.audioUrl,
-            videoUrl: v.videoUrl, pageUrl: v.pageUrl, fileName: v.fileName }));
-          await chrome.storage.session.set({ ['batch:' + id]: queue });
+            videoUrl: v.videoUrl, videoRes: v.videoRes, videoBw: v.videoBw, pageUrl: v.pageUrl, fileName: v.fileName }));
+          // Local storage keeps an interrupted course queue after a browser restart.
+          await (chrome.storage.local || chrome.storage.session).set({ ['batch:' + id]: queue });
           await startDownload(queue[0], queue[0].fileName, true, id);
         } else {
           for (let i = 0; i < items.length; i++) await startDownload({ ...items[i], ...selections.get(items[i].url) }, fileOf(items[i], i), i === 0);
@@ -186,8 +222,8 @@ function startDownload(v, fileName, active, batch = null) {
     let quality = '';
     const availableQualities = v.variants || v.videoTracks || [];
     if (availableQualities.length) {
-      const best = Hls.selectStreams({ variants: availableQualities, renditions: v.renditions || [] }, { maxHeight: lowResource ? 720 : null });
-      if (best.res) quality = 'Качество ' + best.res.split('x')[1] + 'p';
+      const best = Hls.selectStreams({ variants: availableQualities, renditions: v.renditions || [] });
+      if (best?.res) quality = 'Качество ' + best.res.split('x')[1] + 'p';
     } else if (v.size) {
       quality = 'Размер ' + (v.size / 1024 / 1024).toFixed(0) + ' МБ';
     }
@@ -229,9 +265,10 @@ function startDownload(v, fileName, active, batch = null) {
       details.appendChild(summary);
       const quality = document.createElement('select'), audio = document.createElement('select');
       quality.ariaLabel = 'Качество видео'; audio.ariaLabel = 'Язык звука';
-      const defaultVariant = () => Hls.selectStreams({ variants, renditions: v.renditions || [] }, { maxHeight: lowResource ? 720 : null });
+      const defaultVariant = () => Hls.selectStreams({ variants, renditions: v.renditions || [] });
       const best = defaultVariant();
-      const choice = { videoUrl: best?.url, audioUrl: v.audioUrl || null };
+      const choice = { videoUrl: best?.url, videoRes: best?.res || '', videoBw: best?.bw || 0,
+        audioUrl: v.audioUrl || null };
       selections.set(v.url, choice);
       for (const variant of variants) {
         const option = document.createElement('option');
@@ -258,6 +295,8 @@ function startDownload(v, fileName, active, batch = null) {
       quality.onchange = () => {
         choice.videoUrl = quality.value;
         const variant = variants.find(x => x.url === quality.value);
+        choice.videoRes = variant?.res || '';
+        choice.videoBw = variant?.bw || 0;
         if (qualityInfo && variant?.res) qualityInfo.textContent = 'Качество ' + variant.res.split('x')[1] + 'p';
         updateAudio();
       };

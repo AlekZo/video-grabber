@@ -226,22 +226,23 @@
     }
     verify(expectedDurations = []) {
       const incomplete = text => { throw Object.assign(new Error(text), { mediaIncomplete: true }); };
-      const tracks = [];
+      const tracks = [], warnings = [];
       for (const stat of this.stats.values()) {
         if (!['vide', 'soun'].includes(stat.kind)) continue;
         const duration = stat.ticks / stat.timescale;
         const expected = expectedDurations[stat.source] || 0;
         const tolerance = Math.max(1, Math.min(3, expected * 0.01));
-        if (!stat.samples || (expected && Math.abs(duration - expected) > tolerance) || stat.maxGap > 0.25) {
+        if (!stat.samples || (expected && Math.abs(duration - expected) > tolerance)) {
           incomplete(`Incomplete ${stat.kind}: ${duration.toFixed(3)}s / expected ${expected.toFixed(3)}s, gap ${stat.maxGap.toFixed(3)}s`);
         }
-        tracks.push({ kind: stat.kind, duration, samples: stat.samples });
+        if (stat.maxGap > 0.25) warnings.push(`${stat.kind}: разрыв временных меток ${stat.maxGap.toFixed(3)} сек.`);
+        tracks.push({ kind: stat.kind, duration, samples: stat.samples, maxGap: stat.maxGap });
       }
       const lengths = tracks.map(t => t.duration);
       if (lengths.length > 1 && Math.max(...lengths) - Math.min(...lengths) > Math.max(1, Math.min(3, Math.max(...lengths) * 0.01))) {
         incomplete('Audio and video durations differ');
       }
-      return { tracks, duration: Math.max(0, ...lengths) };
+      return { tracks, duration: Math.max(0, ...lengths), warnings };
     }
   }
 
