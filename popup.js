@@ -52,33 +52,41 @@ function scanPage() {
   performance.getEntriesByType('resource').forEach(e => { if (re.test(e.name)) add(e.name, null); });
 
   const frames = isTop
-    ? [...document.querySelectorAll('iframe')].filter(f => f.src).map(f => ({ src: f.src, label: labelFor(f), pos: posOf(f) }))
+    ? [...document.querySelectorAll('iframe')].filter(f => f.src).map(f => ({ src: f.src, title: f.getAttribute('title') || '', label: labelFor(f), pos: posOf(f) }))
     : [];
-  return { href: location.href, isTop, found, frames };
+  const metaTitle = document.querySelector('meta[property="og:title"], meta[name="twitter:title"]')?.getAttribute('content') || '';
+  return { href: location.href, title: metaTitle || document.title || '', isTop, found, frames };
 }
 
-// Сопоставляем рамки плееров с заголовками на основной странице.
+// Сопоставляем рамки плееров с заголовками на основной странице и используем названия самих плееров.
 // results — [{ frameId, result }] из chrome.scripting.executeScript.
 function buildMeta(results) {
   const top = (results.find(r => r.result.isTop) || { result: { frames: [] } }).result;
   const unused = [...top.frames];
   const take = f => { unused.splice(unused.indexOf(f), 1); return f; };
   const samePage = (a, b) => { try { const x = new URL(a), y = new URL(b); return x.origin === y.origin && x.pathname === y.pathname; } catch (e) { return false; } };
+  const usefulTitle = value => {
+    const title = cleanName(value);
+    return /^(?:video|audio|player|video player|audio player|html5 video player|youtube video player|kinescope|vimeo|youtube|vk video|rutube|dailymotion|видео|аудио|плеер|видеоплеер|аудиоплеер)$/i.test(title) ? '' : title;
+  };
 
   const byFrame = {}; // frameId -> { label, pos }
   const byUrl = {};   // адрес видео -> { label, pos }
   for (const { frameId, result: r } of results) {
     let frame = null;
+    const playerTitle = r.isTop ? '' : usefulTitle(r.title);
     if (!r.isTop) {
       // Сначала точное совпадение адреса, потом единственное похожее, потом просто по порядку.
       const similar = unused.filter(f => samePage(f.src, r.href));
       frame = unused.find(f => f.src === r.href) || (similar.length === 1 ? similar[0] : null) || similar[0] || unused[0] || null;
       if (frame) take(frame);
-      byFrame[frameId] = frame ? { label: frame.label, pos: frame.pos } : {};
+      const frameTitle = usefulTitle(frame && frame.title);
+      byFrame[frameId] = { label: playerTitle || frameTitle || (frame && frame.label) || '', ...(frame ? { pos: frame.pos } : {}) };
     }
+    const frameTitle = usefulTitle(frame && frame.title);
     for (const f of r.found) {
       byUrl[f.url] = {
-        label: f.label || (frame && frame.label) || '',
+        label: playerTitle || frameTitle || f.label || (frame && frame.label) || '',
         pos: r.isTop ? f.pos : frame ? frame.pos + (f.pos || 0) : f.pos,
       };
     }
@@ -188,6 +196,7 @@ async function startDownload(v, fileName, active, batch = null, index = 0) {
   scanAgain.onclick = () => location.reload();
   root.replaceChildren(h1, scanAgain);
   const selections = new Map();
+  const selectedName = (v, i) => cleanName(selections.get(v.url)?.fileName) || fileOf(v, i);
 
   if (items.length > 1) {
     const all = document.createElement('button');
@@ -198,7 +207,7 @@ async function startDownload(v, fileName, active, batch = null, index = 0) {
       try {
         if (lowResource) {
           const id = crypto.randomUUID();
-          const jobs = items.map((v, i) => ({ ...v, ...selections.get(v.url), fileName: fileOf(v, i) }));
+          const jobs = items.map((v, i) => ({ ...v, ...selections.get(v.url), fileName: selectedName(v, i) }));
           // Только необходимые для загрузки поля: не сохраняем заново длинные списки сегментов.
           const queue = jobs.map(v => ({ url: v.url, kind: v.kind, mediaType: v.mediaType, audioUrl: v.audioUrl,
             videoUrl: v.videoUrl, videoRes: v.videoRes, videoBw: v.videoBw, pageUrl: v.pageUrl, fileName: v.fileName }));
@@ -206,7 +215,7 @@ async function startDownload(v, fileName, active, batch = null, index = 0) {
           await (chrome.storage.local || chrome.storage.session).set({ ['batch:' + id]: queue });
           await startDownload(queue[0], queue[0].fileName, true, id);
         } else {
-          for (let i = 0; i < items.length; i++) await startDownload({ ...items[i], ...selections.get(items[i].url) }, fileOf(items[i], i), i === 0);
+          for (let i = 0; i < items.length; i++) await startDownload({ ...items[i], ...selections.get(items[i].url) }, selectedName(items[i], i), i === 0);
         }
         window.close();
       } catch (e) { all.disabled = false; console.error(e); }
@@ -219,6 +228,8 @@ async function startDownload(v, fileName, active, batch = null, index = 0) {
   }
 
   items.forEach((v, i) => {
+    const choice = { fileName: cleanName(fileOf(v, i)) };
+    selections.set(v.url, choice);
     let quality = '';
     const availableQualities = v.variants || v.videoTracks || [];
     if (availableQualities.length) {
@@ -252,24 +263,36 @@ async function startDownload(v, fileName, active, batch = null, index = 0) {
       btn.appendChild(s);
     }
     btn.onclick = () => {
-      startDownload({ ...v, ...selections.get(v.url) }, fileOf(v, i), true);
+      startDownload({ ...v, ...selections.get(v.url) }, selectedName(v, i), true);
       window.close();
     };
     root.appendChild(btn);
+
+    const details = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = 'Название и настройки';
+    details.appendChild(summary);
+    const nameLabel = document.createElement('label');
+    nameLabel.className = 'file-name';
+    nameLabel.textContent = 'Имя файла (без расширения)';
+    const nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.value = choice.fileName;
+    nameInput.maxLength = 100;
+    nameInput.ariaLabel = 'Имя файла для ' + titleOf(v, i);
+    nameInput.oninput = () => { choice.fileName = nameInput.value; };
+    nameLabel.appendChild(nameInput);
+    details.appendChild(nameLabel);
+
     const variants = v.variants || v.videoTracks || [];
     const audioTracks = v.renditions?.filter(r => r.type === 'AUDIO') || v.audioTracks || [];
     if (variants.length > 1 || audioTracks.length > 1) {
-      const details = document.createElement('details');
-      const summary = document.createElement('summary');
-      summary.textContent = 'Качество и язык звука';
-      details.appendChild(summary);
       const quality = document.createElement('select'), audio = document.createElement('select');
       quality.ariaLabel = 'Качество видео'; audio.ariaLabel = 'Язык звука';
       const defaultVariant = () => Hls.selectStreams({ variants, renditions: v.renditions || [] });
       const best = defaultVariant();
-      const choice = { videoUrl: best?.url, videoRes: best?.res || '', videoBw: best?.bw || 0,
-        audioUrl: v.audioUrl || null };
-      selections.set(v.url, choice);
+      Object.assign(choice, { videoUrl: best?.url, videoRes: best?.res || '', videoBw: best?.bw || 0,
+        audioUrl: v.audioUrl || null });
       for (const variant of variants) {
         const option = document.createElement('option');
         option.value = variant.url;
@@ -305,7 +328,7 @@ async function startDownload(v, fileName, active, batch = null, index = 0) {
       resetQuality.push(() => { quality.value = defaultVariant()?.url || ''; quality.onchange(); });
       if (variants.length > 1) details.appendChild(quality);
       details.appendChild(audio);
-      root.appendChild(details);
     }
+    root.appendChild(details);
   });
 })();
