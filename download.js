@@ -284,6 +284,8 @@ const extReady = new Promise(r => { resolveExt = r; });
 let target = null;       // { type: 'folder', dir, fileName, fh, writable } | { type: 'downloads', saveAs }
 let downloadDone = false;
 let finishing = null;
+// File System Access не сообщает букву диска: для его корня name обычно равно "\".
+const destinationText = dir => !dir.name || /^[\\/]+$/.test(dir.name) ? 'в корень выбранного диска' : `в папку «${dir.name}»`;
 
 async function chooseFolder(reuse = false) {
   if (target || saved || failed) return; // папка уже выбрана или всё закончено
@@ -296,7 +298,16 @@ async function chooseFolder(reuse = false) {
       dir = last;
     } else dir = await window.showDirectoryPicker({ id: 'video-grabber', mode: 'readwrite', startIn: last || 'downloads' });
   } catch (e) {
-    if (e.name === 'AbortError') return; // передумали — ничего страшного
+    if (e.name === 'AbortError') {
+      if (downloadDone) pickStatus('Если браузер не разрешил открыть папку, нажмите «или сохранить в Загрузки» или выберите другую папку.');
+      return; // скачанные данные остаются во временном файле
+    }
+    if (e.name === 'SecurityError' || e.name === 'NotAllowedError') {
+      // Windows может считать «Загрузки» системной папкой. Обычное «Сохранить как» это обходит.
+      pickStatus('Браузер запретил прямой доступ к папке. Сохраняю через обычное окно «Сохранить как».');
+      chooseDownloads(true);
+      return;
+    }
     await kv('folder', null).catch(() => {}); // прошлая папка, видимо, пропала
     pickStatus('Не получилось открыть выбор папки. Нажмите кнопку ещё раз.', 'err');
     return;
@@ -307,7 +318,7 @@ async function chooseFolder(reuse = false) {
   target = { type: 'folder', dir };
   $('pick').style.display = 'none';
   $('toDownloads').style.display = 'none';
-  $('chooseText').textContent = `Сохраняю в папку «${dir.name}».`;
+  $('chooseText').textContent = `Сохраняю ${destinationText(dir)}.`;
 
   try {
     const ext = await extReady;
@@ -320,7 +331,7 @@ async function chooseFolder(reuse = false) {
   if (failed) { await target.writable.abort().catch(() => {}); await dir.removeEntry(target.fileName).catch(() => {}); return; }
   const onCopyProgress = (d, t) => {
     const fraction = t ? d / t : 1;
-    const text = `Переношу скачанное в папку «${dir.name}»… ${Math.floor(fraction * 100)}%`;
+    const text = `Переношу скачанное ${destinationText(dir)}… ${Math.floor(fraction * 100)}%`;
     if (downloadDone) progress(fraction, text, false); else pickStatus(text);
   };
   if (resource.enabled && spool) {
@@ -358,7 +369,7 @@ function maybeFinish() {
 async function finishFolder() {
   await sink.chain;
   if (spool) {
-    await spool.copyTo(target.writable, (d, total) => progress(total ? d / total : 1, `Сохраняю в папку «${target.dir.name}»…`, false))
+    await spool.copyTo(target.writable, (d, total) => progress(total ? d / total : 1, `Сохраняю ${destinationText(target.dir)}…`, false))
       .catch(e => { throw writeError(e); });
   }
   $('status').textContent = 'Завершаю сохранение…';
@@ -366,7 +377,7 @@ async function finishFolder() {
   if (spool) await spool.dispose().catch(console.warn);
   const ext = await extReady;
   done({
-    where: `в папку «${target.dir.name}»`,
+    where: destinationText(target.dir),
     fileName: target.fileName,
     watch: ['mp4', 'm4a'].includes(ext) ? () => target.fh.getFile() : null,
   });
@@ -469,7 +480,7 @@ async function onDownloaded() {
     $('percent').textContent = '100%';
     if (canPick) {
       $('status').textContent = 'Осталось выбрать, куда его сохранить.';
-      $('chooseText').textContent = 'Нажмите оранжевую кнопку и выберите папку — например, флешку.';
+      $('chooseText').textContent = 'Выберите флешку или другую папку. Для стандартных «Загрузок» нажмите ссылку «или сохранить в Загрузки».';
     } else {
       $('status').textContent = 'Выберите, куда его сохранить.';
       chooseDownloads(true); // Firefox: сразу открываем окно «Сохранить как»
